@@ -1,0 +1,10 @@
+{
+    "installCommand": "pnpm install",
+    "buildCommand": "cd artifacts/stealthflow && pnpm run build",
+    "outputDirectory": "artifacts/stealthflow/dist",
+    "framework": null,
+    "rewrites": [
+      { "source": "/(.*)", "destination": "/index.html" }
+    ]
+  }
+  
