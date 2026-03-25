@@ -1,0 +1,8 @@
+[profile.default]
+src = "contracts"
+out = "out"
+script = "script"
+libs = ["node_modules", "lib"]
+
+[rpc_endpoints]
+sepolia = "https://ethereum-sepolia.publicnode.com"
