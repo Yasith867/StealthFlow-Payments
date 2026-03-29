@@ -125,10 +125,10 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
       await tx1.wait();
 
       // 2. Wait for Coprocessor callback
-      toast.info("Waiting for Fhenix Oracle to unseal amount (takes ~20s)...", { duration: 10000 });
+      toast.info("Waiting for Fhenix Oracle to unseal amount (may take up to 2 min)...", { duration: 15000 });
       let ready = false;
-      for (let i = 0; i < 15; i++) {
-        await new Promise(r => setTimeout(r, 4000));
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 5000));
         try {
           await contract.executePayment.staticCall(payment.id);
           ready = true;
