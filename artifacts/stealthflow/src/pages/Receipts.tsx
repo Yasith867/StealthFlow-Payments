@@ -4,7 +4,7 @@
  * connected wallet. Tabs switch between the two views.
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   CheckCircle2,
   ExternalLink,
@@ -65,6 +65,8 @@ export default function Receipts({ wallet, onConnect }: ReceiptsProps) {
   const [refreshing, setRefreshing] = useState(false);
   const [txMap, setTxMap] = useState<Record<string, string>>({});
   const [activeTab, setActiveTab] = useState<Tab>("received");
+  const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const walletAddr = wallet?.address?.toLowerCase() ?? "";
 
@@ -124,6 +126,32 @@ export default function Receipts({ wallet, onConnect }: ReceiptsProps) {
     }, 5000);
     return () => clearInterval(interval);
   }, [load, loadPayments]);
+
+  // Scroll to + highlight a specific receipt when URL hash is present (e.g. #receipt-16)
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (!hash.startsWith("#receipt-")) return;
+    const targetId = hash.slice("#receipt-".length);
+    setHighlightedId(targetId);
+    // Switch to the correct tab based on which list contains this payment
+    const match = allPayments.find((p) => String(p.id) === targetId);
+    if (match) {
+      const isSent = match.sender?.toLowerCase() === walletAddr;
+      setActiveTab(isSent ? "sent" : "received");
+    }
+    // Scroll after a short delay to let the tab switch render
+    const scrollTimer = setTimeout(() => {
+      const el = document.getElementById(`receipt-${targetId}`);
+      el?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 150);
+    // Remove highlight after 3 seconds
+    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    highlightTimerRef.current = setTimeout(() => setHighlightedId(null), 3200);
+    return () => {
+      clearTimeout(scrollTimer);
+      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    };
+  }, [allPayments, walletAddr]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -259,10 +287,16 @@ export default function Receipts({ wallet, onConnect }: ReceiptsProps) {
               const txHash = txMap[id];
               const isSent = activeTab === "sent";
 
+              const isHighlighted = highlightedId === id;
               return (
                 <div
                   key={id}
-                  className="rounded-xl bg-white/[0.025] border border-white/8 overflow-hidden"
+                  id={`receipt-${id}`}
+                  className={`rounded-xl border overflow-hidden transition-all duration-700 ${
+                    isHighlighted
+                      ? "bg-violet-500/10 border-violet-400/50 shadow-[0_0_20px_rgba(139,92,246,0.3)]"
+                      : "bg-white/[0.025] border-white/8"
+                  }`}
                 >
                   {/* Top bar */}
                   <div className={`flex items-center justify-between px-5 py-3 border-b ${

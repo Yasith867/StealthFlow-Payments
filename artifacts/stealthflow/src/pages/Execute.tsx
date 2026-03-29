@@ -11,7 +11,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Link } from "wouter";
+import { Link, useLocation } from "wouter";
 import {
   Zap,
   Clock,
@@ -65,6 +65,7 @@ function LiveCountdown({ unlockTime }: { unlockTime: bigint }) {
 }
 
 export default function Execute({ wallet, onConnect }: ExecuteProps) {
+  const [, navigate] = useLocation();
   const [payments, setPayments] = useState<ContractPayment[]>([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -227,7 +228,12 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
               View on Etherscan ↗
             </a>
             <br />
-            <span className="text-gray-400 text-xs">Sent via smart contract</span>
+            <button
+              onClick={() => navigate(`/receipts#receipt-${key}`)}
+              className="text-violet-400 underline font-medium text-xs mt-1 inline-block"
+            >
+              View Receipt →
+            </button>
           </span>
         ) as unknown as string,
         duration: 12000,
