@@ -1,9 +1,16 @@
 /**
  * Execute.tsx
  * Shows all unlocked payments from the contract and lets users execute them.
+ *
+ * Two-phase flow (no inline oracle waiting):
+ *   Phase 1 – "Request Decrypt": sends requestDecryptAmount tx, marks payment as
+ *              oracle-pending in localStorage, then immediately returns.
+ *   Phase 2 – "Complete Transfer": only shown once a background poll detects the
+ *              oracle has responded (executePayment.staticCall succeeds). Calls
+ *              executePayment directly with no timeout risk.
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Link } from "wouter";
 import {
   Zap,
@@ -15,6 +22,7 @@ import {
   ExternalLink,
   ArrowLeft,
   AlertTriangle,
+  Hourglass,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Contract } from "ethers";
@@ -27,11 +35,16 @@ import {
   STEALTH_WALLET_ABI,
   formatUnlockTime,
   formatCountdown,
-  formatEth,
   ETHERSCAN_TX,
   ETHERSCAN_ADDR,
 } from "@/lib/contract";
-import { saveTxHash, loadTxMap } from "@/lib/txStorage";
+import {
+  saveTxHash,
+  loadTxMap,
+  markDecryptPending,
+  clearDecryptPending,
+  loadDecryptPending,
+} from "@/lib/txStorage";
 import type { ContractPayment } from "./Dashboard";
 import { getPaymentStatus } from "@/lib/paymentStatus";
 
@@ -58,12 +71,26 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
   const [executing, setExecuting] = useState<string | null>(null);
   const [txMap, setTxMap] = useState<Record<string, string>>(() => loadTxMap());
 
+  // Payments where we've sent requestDecryptAmount but oracle hasn't responded yet
+  const [decryptPending, setDecryptPending] = useState<Record<string, boolean>>(
+    () => loadDecryptPending()
+  );
+  // Payments where the oracle has responded and executePayment is ready
+  const [oracleReady, setOracleReady] = useState<Set<string>>(new Set());
+
   const walletAddr = wallet?.address?.toLowerCase() ?? "";
+  const contractRef = useRef<Contract | null>(null);
+
+  useEffect(() => {
+    if (wallet) {
+      contractRef.current = new Contract(CONTRACT_ADDRESS, STEALTH_WALLET_ABI, wallet.signer);
+    }
+  }, [wallet]);
 
   const loadPayments = useCallback(async () => {
     if (!wallet || !CONTRACT_DEPLOYED) return;
     try {
-      const contract = new Contract(CONTRACT_ADDRESS, STEALTH_WALLET_ABI, wallet.signer);
+      const contract = contractRef.current!;
       const count = await contract.getPaymentCount();
       const all: ContractPayment[] = [];
       for (let i = 0; i < Number(count); i++) {
@@ -77,7 +104,6 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
           executed: r.executed as boolean,
         });
       }
-      // Privacy: only show payments where wallet is sender or recipient
       const authorized = all.filter(
         (p) =>
           p.sender?.toLowerCase() === walletAddr ||
@@ -89,6 +115,37 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
     }
   }, [wallet, walletAddr]);
 
+  /** Poll oracle-pending payments to see if executePayment is ready */
+  const pollOracleReady = useCallback(async () => {
+    const contract = contractRef.current;
+    if (!contract) return;
+    const pending = loadDecryptPending();
+    const ids = Object.keys(pending);
+    if (ids.length === 0) return;
+
+    const nowReady: string[] = [];
+    for (const id of ids) {
+      try {
+        await contract.executePayment.staticCall(BigInt(id));
+        nowReady.push(id);
+      } catch {
+        // Oracle hasn't responded yet for this one — keep waiting
+      }
+    }
+
+    if (nowReady.length > 0) {
+      for (const id of nowReady) {
+        clearDecryptPending(id);
+      }
+      setDecryptPending(loadDecryptPending());
+      setOracleReady((prev) => {
+        const next = new Set(prev);
+        for (const id of nowReady) next.add(id);
+        return next;
+      });
+    }
+  }, []);
+
   const load = useCallback(async () => {
     setLoading(true);
     await loadPayments();
@@ -97,14 +154,91 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
 
   useEffect(() => {
     load();
-    const interval = setInterval(loadPayments, 5000);
-    return () => clearInterval(interval);
-  }, [load, loadPayments]);
+    // Refresh payment list every 10s
+    const paymentInterval = setInterval(loadPayments, 10000);
+    // Poll oracle status every 5s (lightweight staticCall)
+    const oracleInterval = setInterval(pollOracleReady, 5000);
+    return () => {
+      clearInterval(paymentInterval);
+      clearInterval(oracleInterval);
+    };
+  }, [load, loadPayments, pollOracleReady]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
     await load();
+    await pollOracleReady();
     setRefreshing(false);
+  };
+
+  /**
+   * Phase 1: send requestDecryptAmount and persist pending state.
+   * Returns immediately — the oracle poll will detect when it's done.
+   */
+  const handleRequestDecrypt = async (payment: ContractPayment) => {
+    if (!wallet || !contractRef.current) return;
+    const key = String(payment.id ?? "?");
+    setExecuting(key);
+    try {
+      const contract = contractRef.current;
+      const tx = await contract.requestDecryptAmount(payment.id) as { hash: string; wait: () => Promise<unknown> };
+      saveTxHash(key + "_decrypt", tx.hash);
+      await tx.wait();
+
+      markDecryptPending(key);
+      setDecryptPending(loadDecryptPending());
+
+      toast.info("Decryption requested. The oracle is processing — check back shortly to complete the transfer.", {
+        duration: 8000,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Request failed";
+      toast.error("Decrypt request failed", { description: msg });
+    } finally {
+      setExecuting(null);
+    }
+  };
+
+  /**
+   * Phase 2: oracle has confirmed — call executePayment directly, no polling needed.
+   */
+  const handleCompleteTransfer = async (payment: ContractPayment) => {
+    if (!wallet || !contractRef.current) return;
+    const key = String(payment.id ?? "?");
+    setExecuting(key);
+    try {
+      const contract = contractRef.current;
+      const tx = await contract.executePayment(payment.id) as { hash: string; wait: () => Promise<unknown> };
+
+      saveTxHash(key, tx.hash);
+      setTxMap((prev) => ({ ...prev, [key]: tx.hash }));
+      setOracleReady((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+      setExecuting(null);
+
+      toast.success("Transaction submitted!", {
+        description: (
+          <span>
+            Payment executed for {shortenAddress(payment.recipient)}.{" "}
+            <a href={ETHERSCAN_TX(tx.hash)} target="_blank" rel="noopener noreferrer" className="underline font-medium">
+              View on Etherscan ↗
+            </a>
+            <br />
+            <span className="text-gray-400 text-xs">Sent via smart contract</span>
+          </span>
+        ) as unknown as string,
+        duration: 12000,
+      });
+
+      tx.wait().then(() => loadPayments()).catch(console.error);
+    } catch (err: unknown) {
+      setExecuting(null);
+      const msg = err instanceof Error ? err.message : "Execution failed";
+      toast.error("Execution failed", { description: msg });
+    }
   };
 
   const now = Date.now() / 1000;
@@ -112,69 +246,6 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
   const ready = pending.filter((p) => Number(p.unlockTime) <= now);
   const locked = pending.filter((p) => Number(p.unlockTime) > now);
   const recentExecuted = payments.filter((p) => p.executed).slice(-5).reverse();
-
-  const handleExecute = async (payment: ContractPayment) => {
-    if (!wallet) return;
-    const key = String(payment.id ?? "?");
-    setExecuting(key);
-    try {
-      const contract = new Contract(CONTRACT_ADDRESS, STEALTH_WALLET_ABI, wallet.signer);
-      // 1. Request Decryption
-      const tx1 = await contract.requestDecryptAmount(payment.id) as { hash: string; wait: () => Promise<unknown> };
-      saveTxHash(key + "_decrypt", tx1.hash);
-      await tx1.wait();
-
-      // 2. Wait for Coprocessor callback
-      toast.info("Waiting for Fhenix Oracle to unseal amount (may take up to 2 min)...", { duration: 15000 });
-      let ready = false;
-      for (let i = 0; i < 30; i++) {
-        await new Promise(r => setTimeout(r, 5000));
-        try {
-          await contract.executePayment.staticCall(payment.id);
-          ready = true;
-          break;
-        } catch (err) {
-          // Still waiting for oracle callback
-        }
-      }
-
-      if (!ready) {
-        throw new Error("Oracle decryption took too long. Please click Execute again in a few moments.");
-      }
-
-      // 3. Execute
-      const tx2 = await contract.executePayment(payment.id) as { hash: string; wait: () => Promise<unknown> };
-
-      // Persist tx hash + immediately show "Sending…" state
-      saveTxHash(key, tx2.hash);
-      setTxMap((prev) => ({ ...prev, [key]: tx2.hash }));
-      setExecuting(null);
-
-      toast.success("Transaction submitted!", {
-        description: (
-          <span>
-            Payment executed for {shortenAddress(payment.recipient)}.{" "}
-            <a href={ETHERSCAN_TX(tx2.hash)} target="_blank" rel="noopener noreferrer" className="underline font-medium">
-              View on Etherscan ↗
-            </a>
-            <br />
-            <span className="text-gray-400 text-xs">
-              Sent via smart contract
-            </span>
-          </span>
-        ) as unknown as string,
-        duration: 12000,
-      });
-
-      // Refresh once confirmed → card moves to "Recent Executed" section
-      tx2.wait().then(() => loadPayments()).catch(console.error);
-    } catch (err: unknown) {
-      setExecuting(null);
-      setTxMap((prev) => { const m = { ...prev }; delete m[key]; return m; });
-      const msg = err instanceof Error ? err.message : "Execution failed";
-      toast.error("Execution failed", { description: msg });
-    }
-  };
 
   return (
     <WalletGate wallet={wallet} onConnect={onConnect}>
@@ -233,11 +304,13 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
               <div className="space-y-3">
                 {ready.map((payment) => {
                   const key = String(payment.id ?? "?");
-                  const isExecuting = executing === key;
-                  const isSender    = payment.sender?.toLowerCase() === walletAddr;
-                  const isRecipient = payment.recipient?.toLowerCase() === walletAddr;
-                  const status      = getPaymentStatus(payment, walletAddr, txMap);
-                  const isSending   = status === "sending";
+                  const isExecuting   = executing === key;
+                  const isSender      = payment.sender?.toLowerCase() === walletAddr;
+                  const isRecipient   = payment.recipient?.toLowerCase() === walletAddr;
+                  const status        = getPaymentStatus(payment, walletAddr, txMap);
+                  const isSending     = status === "sending";
+                  const isPendingOracle = decryptPending[key];
+                  const isOracleReady = oracleReady.has(key);
 
                   return (
                     <div
@@ -245,6 +318,10 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
                       className={`p-5 rounded-xl border transition-colors ${
                         isSending
                           ? "bg-blue-500/5 border-blue-500/20"
+                          : isPendingOracle
+                          ? "bg-amber-500/5 border-amber-500/15"
+                          : isOracleReady
+                          ? "bg-violet-500/5 border-violet-500/15 hover:border-violet-500/25"
                           : "bg-emerald-500/5 border-emerald-500/15 hover:border-emerald-500/25"
                       }`}
                     >
@@ -256,6 +333,16 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
                                 <Loader2 className="w-3 h-3 animate-spin" />
                                 Sending…
                               </span>
+                            ) : isPendingOracle ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium text-amber-400 bg-amber-400/8 border border-amber-400/15">
+                                <Hourglass className="w-3 h-3" />
+                                Awaiting Oracle
+                              </span>
+                            ) : isOracleReady ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium text-violet-400 bg-violet-400/8 border border-violet-400/15">
+                                <CheckCircle2 className="w-3 h-3" />
+                                Oracle Ready
+                              </span>
                             ) : (
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium text-cyan-400 bg-cyan-400/8 border border-cyan-400/15">
                                 <Zap className="w-3 h-3" />
@@ -263,7 +350,11 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
                               </span>
                             )}
                             <span className="text-xs text-gray-500">
-                              {isSending ? "Confirming on-chain…" : `Payment #${key}`}
+                              {isSending
+                                ? "Confirming on-chain…"
+                                : isPendingOracle
+                                ? "Decryption in progress — page will update automatically"
+                                : `Payment #${key}`}
                             </span>
                           </div>
                           <div className="flex items-center gap-3 flex-wrap">
@@ -286,14 +377,23 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
                           </div>
                         </div>
 
+                        {/* Action buttons */}
                         {isSending && (
                           <Loader2 className="shrink-0 w-5 h-5 text-blue-400 animate-spin" />
                         )}
-                        {!isSending && isSender && (
+
+                        {!isSending && isSender && isPendingOracle && (
+                          <div className="shrink-0 flex items-center gap-1.5 text-amber-400/70">
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            <span className="text-xs font-medium">Waiting…</span>
+                          </div>
+                        )}
+
+                        {!isSending && isSender && isOracleReady && (
                           <button
-                            onClick={() => handleExecute(payment)}
+                            onClick={() => handleCompleteTransfer(payment)}
                             disabled={executing !== null}
-                            className="shrink-0 flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors shadow-lg shadow-emerald-600/15"
+                            className="shrink-0 flex items-center gap-1.5 px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 disabled:opacity-60 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors shadow-lg shadow-violet-600/15"
                           >
                             {isExecuting ? (
                               <>
@@ -303,11 +403,32 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
                             ) : (
                               <>
                                 <Zap className="w-3.5 h-3.5" />
+                                Complete Transfer
+                              </>
+                            )}
+                          </button>
+                        )}
+
+                        {!isSending && isSender && !isPendingOracle && !isOracleReady && (
+                          <button
+                            onClick={() => handleRequestDecrypt(payment)}
+                            disabled={executing !== null}
+                            className="shrink-0 flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors shadow-lg shadow-emerald-600/15"
+                          >
+                            {isExecuting ? (
+                              <>
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                Requesting…
+                              </>
+                            ) : (
+                              <>
+                                <Zap className="w-3.5 h-3.5" />
                                 Execute Transfer
                               </>
                             )}
                           </button>
                         )}
+
                         {!isSending && isRecipient && !isSender && (
                           <span className="shrink-0 text-xs text-amber-400/70 font-medium">
                             Awaiting sender
