@@ -35,7 +35,6 @@ import {
   STEALTH_WALLET_ABI,
   formatUnlockTime,
   formatCountdown,
-  formatEth,
   ETHERSCAN_TX,
   ETHERSCAN_ADDR,
 } from "@/lib/contract";
@@ -46,7 +45,6 @@ import {
   clearDecryptPending,
   loadDecryptPending,
 } from "@/lib/txStorage";
-import { fetchRevealedAmounts } from "@/lib/paymentEvents";
 import type { ContractPayment } from "./Dashboard";
 import { getPaymentStatus } from "@/lib/paymentStatus";
 
@@ -93,22 +91,17 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
     if (!wallet || !CONTRACT_DEPLOYED) return;
     try {
       const contract = contractRef.current!;
-      const [count, amountMap] = await Promise.all([
-        contract.getPaymentCount(),
-        fetchRevealedAmounts(contract),
-      ]);
+      const count = await contract.getPaymentCount();
       const all: ContractPayment[] = [];
       for (let i = 0; i < Number(count); i++) {
         const r = await contract.getPaymentInfo(i);
-        const id = r.id as bigint;
         all.push({
-          id,
+          id: r.id as bigint,
           encryptedAmount: "Encrypted",
           unlockTime: r.unlockTime as bigint,
           recipient: r.recipient as string,
           sender: r.sender as string,
           executed: r.executed as boolean,
-          revealedAmount: amountMap[String(id)],
         });
       }
       const authorized = all.filter(
@@ -523,16 +516,10 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
                       <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                       <div className="min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
-                          {payment.revealedAmount != null ? (
-                            <span className="text-sm text-emerald-400 font-semibold font-mono">
-                              {formatEth(payment.revealedAmount)}
-                            </span>
-                          ) : (
-                            <span className="text-sm text-gray-300 font-mono font-medium flex items-center gap-1.5">
-                              <Lock className="w-3.5 h-3.5 text-violet-400" />
-                              Encrypted
-                            </span>
-                          )}
+                          <span className="text-sm text-gray-300 font-mono font-medium flex items-center gap-1.5">
+                            <Lock className="w-3.5 h-3.5 text-violet-400" />
+                            Encrypted
+                          </span>
                           <span className="text-gray-600">→</span>
                           <a
                             href={ETHERSCAN_ADDR(payment.recipient)}

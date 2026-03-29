@@ -18,7 +18,7 @@ import {
   ShieldCheck,
   Lock,
 } from "lucide-react";
-import { Contract, formatEther } from "ethers";
+import { Contract } from "ethers";
 import WalletGate from "@/components/WalletGate";
 import type { WalletInfo } from "@/lib/wallet";
 import { shortenAddress } from "@/lib/wallet";
@@ -27,14 +27,12 @@ import {
   CONTRACT_DEPLOYED,
   STEALTH_WALLET_ABI,
   formatUnlockTime,
-  formatEth,
   ETHERSCAN_TX,
   ETHERSCAN_ADDR,
 } from "@/lib/contract";
 import type { ContractPayment } from "./Dashboard";
 import { loadTxMap } from "@/lib/txStorage";
 import { receiptsKey, saveHistory, loadHistory } from "@/lib/historyStorage";
-import { fetchRevealedAmounts } from "@/lib/paymentEvents";
 
 interface ReceiptsProps {
   wallet: WalletInfo | null;
@@ -81,22 +79,17 @@ export default function Receipts({ wallet, onConnect }: ReceiptsProps) {
     if (!wallet || !CONTRACT_DEPLOYED) return;
     try {
       const contract = new Contract(CONTRACT_ADDRESS, STEALTH_WALLET_ABI, wallet.signer);
-      const [count, amountMap] = await Promise.all([
-        contract.getPaymentCount(),
-        fetchRevealedAmounts(contract),
-      ]);
+      const count = await contract.getPaymentCount();
       const mapped: ContractPayment[] = [];
       for (let i = 0; i < Number(count); i++) {
         const r = await contract.getPaymentInfo(i);
-        const id = r.id as bigint;
         mapped.push({
-          id,
+          id: r.id as bigint,
           encryptedAmount: "Encrypted",
           unlockTime: r.unlockTime as bigint,
           recipient: r.recipient as string,
           sender: r.sender as string,
           executed: r.executed as boolean,
-          revealedAmount: amountMap[String(id)],
         });
       }
       // All executed payments where this wallet is sender OR recipient
