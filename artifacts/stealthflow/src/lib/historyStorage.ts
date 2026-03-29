@@ -20,6 +20,7 @@ export function saveHistory(key: string, payments: ContractPayment[]): void {
       ...p,
       id: p.id?.toString() ?? "0",
       unlockTime: p.unlockTime?.toString() ?? "0",
+      revealedAmount: p.revealedAmount != null ? p.revealedAmount.toString() : undefined,
     }));
     localStorage.setItem(key, JSON.stringify(serialized));
   } catch {
@@ -39,6 +40,7 @@ export function loadHistory(key: string): ContractPayment[] {
       recipient: String(p.recipient),
       sender: String(p.sender),
       executed: Boolean(p.executed),
+      revealedAmount: p.revealedAmount != null ? BigInt(String(p.revealedAmount)) : undefined,
     }));
   } catch {
     return [];

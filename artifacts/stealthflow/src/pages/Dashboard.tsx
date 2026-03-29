@@ -37,6 +37,7 @@ import {
   ETHERSCAN_ADDR,
 } from "@/lib/contract";
 import { saveTxHash, loadTxMap } from "@/lib/txStorage";
+import { fetchRevealedAmounts } from "@/lib/paymentEvents";
 import { getPaymentStatus } from "@/lib/paymentStatus";
 import type { PaymentStatus } from "@/lib/paymentStatus";
 import {
@@ -59,6 +60,7 @@ export interface ContractPayment {
   recipient: string;
   sender: string;
   executed: boolean;
+  revealedAmount?: bigint;
 }
 
 type Filter = "all" | "sent" | "received" | "pending" | "executed";
@@ -127,17 +129,22 @@ export default function Dashboard({ wallet, onConnect }: DashboardProps) {
     if (!wallet || !CONTRACT_DEPLOYED) return;
     try {
       const contract = new Contract(CONTRACT_ADDRESS, STEALTH_WALLET_ABI, wallet.signer);
-      const count = await contract.getPaymentCount();
+      const [count, amountMap] = await Promise.all([
+        contract.getPaymentCount(),
+        fetchRevealedAmounts(contract),
+      ]);
       const all: ContractPayment[] = [];
       for (let i = 0; i < Number(count); i++) {
         const r = await contract.getPaymentInfo(i);
+        const id = r.id as bigint;
         all.push({
-          id: r.id as bigint,
+          id,
           encryptedAmount: "Encrypted",
           unlockTime: r.unlockTime as bigint,
           recipient: r.recipient as string,
           sender: r.sender as string,
           executed: r.executed as boolean,
+          revealedAmount: amountMap[String(id)],
         });
       }
       // Privacy: only show payments where this wallet is sender or recipient
@@ -478,15 +485,17 @@ export default function Dashboard({ wallet, onConnect }: DashboardProps) {
                       {/* Amount + addresses */}
                       <div className="flex items-center gap-3 flex-wrap">
                         <div className="flex items-center gap-1.5">
-                          <Lock className="w-3 h-3 text-violet-400" />
-                          {payment.executed ? (
+                          {payment.revealedAmount != null ? (
                             <span className="text-sm text-emerald-400 font-semibold font-mono">
-                              Sent
+                              {formatEth(payment.revealedAmount)}
                             </span>
                           ) : (
-                            <span className="text-sm text-violet-300/60 italic font-mono">
-                              🔒 Encrypted
-                            </span>
+                            <>
+                              <Lock className="w-3 h-3 text-violet-400" />
+                              <span className="text-sm text-violet-300/60 italic font-mono">
+                                🔒 Encrypted
+                              </span>
+                            </>
                           )}
                         </div>
                         <span className="text-gray-600">from</span>
