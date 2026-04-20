@@ -1,5 +1,5 @@
 {
-  "installCommand": "cd artifacts/stealthflow && pnpm install",
+  "installCommand": "cd artifacts/stealthflow && pnpm install --no-frozen-lockfile",
   "buildCommand": "cd artifacts/stealthflow && pnpm run build",
   "outputDirectory": "artifacts/stealthflow/dist"
 }
