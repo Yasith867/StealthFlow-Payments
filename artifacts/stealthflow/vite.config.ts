@@ -10,59 +10,79 @@ const port = rawPort ? Number(rawPort) : 3000;
 
 const basePath = process.env.BASE_PATH ?? "/";
 
-export default defineConfig({
-  base: basePath,
-  plugins: [
-    wasm(),
-    topLevelAwait(),
-    react(),
-    tailwindcss(),
-    ...(process.env.NODE_ENV !== "production" &&
-    process.env.REPL_ID !== undefined
-      ? [
-          await import("@replit/vite-plugin-runtime-error-modal").then((m) =>
-            m.default(),
-          ),
-          await import("@replit/vite-plugin-cartographer").then((m) =>
-            m.cartographer({
-              root: path.resolve(import.meta.dirname, ".."),
+export default defineConfig(async () => {
+  const isDev =
+    process.env.NODE_ENV !== "production" &&
+    process.env.REPL_ID !== undefined;
+
+  return {
+    base: basePath,
+
+    plugins: [
+      wasm(),
+      topLevelAwait(),
+      react(),
+      tailwindcss(),
+
+      ...(isDev
+        ? [
+            (await import("@replit/vite-plugin-runtime-error-modal")).default(),
+            (await import("@replit/vite-plugin-cartographer")).cartographer({
+              root: path.resolve(__dirname, ".."),
             }),
-          ),
-          await import("@replit/vite-plugin-dev-banner").then((m) =>
-            m.devBanner(),
-          ),
-        ]
-      : []),
-  ],
-  resolve: {
-    alias: {
-      "@": path.resolve(import.meta.dirname, "src"),
-      "@assets": path.resolve(import.meta.dirname, "..", "..", "attached_assets"),
+            (await import("@replit/vite-plugin-dev-banner")).devBanner(),
+          ]
+        : []),
+    ],
+
+    resolve: {
+      alias: {
+        "@": path.resolve(__dirname, "src"),
+        "@assets": path.resolve(__dirname, "..", "..", "attached_assets"),
+      },
+      dedupe: ["react", "react-dom"],
     },
-    dedupe: ["react", "react-dom"],
-  },
-  root: path.resolve(import.meta.dirname),
-  build: {
-    outDir: path.resolve(import.meta.dirname, "dist"),
-    emptyOutDir: true,
-    target: "esnext",
-  },
-  optimizeDeps: {
-    exclude: ["tfhe", "node-tfhe"],
-    include: ["@cofhe/sdk > viem", "@cofhe/sdk > zod"],
-  },
-  server: {
-    port,
-    host: "0.0.0.0",
-    allowedHosts: true,
-    fs: {
-      strict: true,
-      deny: ["**/.*"],
+
+    root: path.resolve(__dirname),
+
+    build: {
+      outDir: path.resolve(__dirname, "dist"),
+      emptyOutDir: true,
+      target: "esnext",
+
+      // 🔥 IMPORTANT FIX (cofhe worker issue)
+      rollupOptions: {
+        output: {
+          format: "es",
+        },
+      },
     },
-  },
-  preview: {
-    port,
-    host: "0.0.0.0",
-    allowedHosts: true,
-  },
+
+    // 🔥 IMPORTANT FIX (worker format issue)
+    worker: {
+      format: "es",
+    },
+
+    // 🔥 IMPORTANT FIX (dependency conflicts)
+    optimizeDeps: {
+      exclude: ["tfhe", "node-tfhe", "@cofhe/sdk"],
+      include: ["@cofhe/sdk > viem", "@cofhe/sdk > zod"],
+    },
+
+    server: {
+      port,
+      host: "0.0.0.0",
+      allowedHosts: true,
+      fs: {
+        strict: true,
+        deny: ["**/.*"],
+      },
+    },
+
+    preview: {
+      port,
+      host: "0.0.0.0",
+      allowedHosts: true,
+    },
+  };
 });
