@@ -1,0 +1,84 @@
+🦇 What it does
+
+Z0tz ships private wallets from day one using FHE. No seed phrases — P-256 passkeys. Balances are encrypted on-chain via Fhenix CoFHE under a pseudonymous ledger. Payments are unlinkable through stealth addresses, and all transactions are gasless via a paymaster — users never need ETH.
+
+✅ 39 verified contracts across 3 testnets
+✅ V6.5 flows E2E — 3 chains, 7 operations, zero admin keys
+
+⚠️ The problem it solves
+
+Most wallets expose everything: identity (addresses), behavior (transactions), metadata (IP/timing), and value (balances). This enables surveillance, MEV extraction, and limits adoption.
+
+Z0tz makes privacy the default — not a toggle. It combines encrypted state, stealth-addressed execution, and pseudonymous accounting as core primitives.
+
+🧱 Challenges
+
+ERC-4337 + P-256 passkeys
+Integrated Daimo P-256 verifier with EntryPoint v0.8. RIP-7212 precompile (~3.5K gas/verify) made direct ledger auth viable without ERC-1271.
+
+Gasless UX from day one
+Users start without ETH. Solved via paymaster sponsoring deployment and txs, charging a 1% token fee.
+
+Pooled vault + pseudonymous ledger
+V6.5 moves balances out of FHERC20 into a ledger keyed by HKDF pseudonyms — smart accounts never appear in token events.
+
+Cross-chain via Circle CCTP V2
+Dropped custom bridge. CCTP burns/mints USDC; Z0tz wraps both ends in stealth addresses so the bridge sees random identities.
+
+FHE integration
+CoFHE requires TFHE + ZK proofs. Designed async flows + self-call ACL so the ledger verifies encrypted inputs bound to itself.
+
+🧪 Technologies
+
+🔐 Fhenix CoFHE — TFHE + ZK
+📦 ERC-4337 v0.8 — EntryPoint
+🔑 P-256/WebAuthn — RIP-7212
+👻 ERC-5564/6538 — stealth
+🌉 Circle CCTP V2
+🖼️ Steganographic recovery (PNG)
+⛽ Custom paymaster + relayer
+📝 Solidity 0.8.28 (multi-chain)
+⌨️ TypeScript, viem, Next.js, Hardhat
+
+⚙️ How we built it
+
+Identity
+P-256 passkeys → ERC-4337 smart accounts → direct RIP-7212 verification at the ledger. CREATE2 enables deterministic, gasless deployment.
+
+Execution
+Relayer submits UserOps + ledger ops → EntryPoint / ledger → Z0tzPaymaster sponsors gas (1% fee). Users never handle ETH.
+
+Privacy
+Three stealth families derive from one passkey (cash-in HKDF, permanent smart, permanent EOA).
+A pooled vault holds FHERC20; the ledger tracks balances under pseudonymous IDs that rotate per spend.
+
+Cross-chain transfers route through stealth pairs over CCTP — the bridge only sees random addresses.
+
+Infrastructure
+Vercel deployment acts as frontend + relayer, unifying UX and execution.
+
+🧠 What we learned
+
+Privacy must be architectural — retrofitting always leaks.
+
+FHE is already viable for wallets; the challenge is system design, not computation.
+
+Gasless UX is critical: requiring ETH forces users through centralized exchanges, breaking privacy.
+
+Composing with permissionless infra (CoFHE, CCTP, ERC-4337) > building walled gardens — Z0tz inherits decentralization by design.
+
+🚀 What’s next
+
+Z0tz evolves into a privacy wallet layer for Fhenix:
+
+📦 Z0tz SDK (@z0tz/sdk)
+🖥️ Electron GUI (V6.5 shipped)
+🧅 TOR/NYM routing (zero IP traceability)
+🌐 P2P relayer network
+🔗 More rails (LayerZero, Hyperlane)
+🏭 Mainnet + audit
+
+Fhenix encrypts computation. Z0tz encrypts the user. 🦇
+
+https://z0tz-landing-page.vercel.app/
+https://github.com/0xOucan/Z0tz
