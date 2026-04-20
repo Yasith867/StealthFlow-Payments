@@ -1,12 +1,20 @@
 /**
  * contract.ts
  *
- * Updated for REAL Fhenix CoFHE integration on Ethereum Sepolia.
+ * Fhenix CoFHE integration on Ethereum Sepolia.
+ * Migrated to @cofhe/sdk (v0.4.0) - fhenixjs/cofhejs deprecated.
  */
 
 // Deployment address on Ethereum Sepolia
 export const CONTRACT_ADDRESS = "0x7091056ca13fd6a2e09d0bc4944e87a0b6b909cb";
 export const CONTRACT_DEPLOYED = true;
+
+// CoFHE TaskManager — receives publishDecryptResult calls from the new SDK decrypt flow
+export const TASK_MANAGER_ADDRESS = "0xeA30c4B8b44078Bbf8a6ef5b9f1eC1626C7848D9";
+export const TASK_MANAGER_ABI = [
+  "function publishDecryptResult(uint256 ctHash, uint256 result, bytes calldata signature) external",
+  "function getDecryptResultSafe(uint256 ctHash) external view returns (uint256 result, bool decrypted)",
+];
 
 // Ethereum Sepolia network configuration for MetaMask
 export const ETH_SEPOLIA = {

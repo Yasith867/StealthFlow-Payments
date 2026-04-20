@@ -1,6 +1,7 @@
 /**
  * Create.tsx
  * Form to schedule a new encrypted payment.
+ * Migrated to @cofhe/sdk (v0.4.0) — cofhejs deprecated.
  */
 
 import { useState, useEffect } from "react";
@@ -22,11 +23,13 @@ import type { WalletInfo } from "@/lib/wallet";
 import {
   CONTRACT_ADDRESS,
   CONTRACT_DEPLOYED,
+  ETH_SEPOLIA,
   STEALTH_WALLET_ABI,
   formatCountdown,
 } from "@/lib/contract";
-// @ts-ignore
-import { cofhejs, Encryptable } from "cofhejs/web";
+import { createCofheConfig, createCofheClient } from "@cofhe/sdk/web";
+import { Ethers6Adapter } from "@cofhe/sdk/adapters";
+import { Encryptable } from "@cofhe/sdk";
 
 interface CreateProps {
   wallet: WalletInfo | null;
@@ -77,7 +80,8 @@ export default function Create({ wallet, onConnect }: CreateProps) {
   const validate = (): string | null => {
     const amt = parseFloat(amount);
     if (!amount || isNaN(amt) || amt <= 0) return "Amount must be a positive number.";
-    if (!delay || delayNum < 60) return "Unlock delay must be at least 60 seconds to ensure the transaction mines before the deadline.";
+    if (!delay || delayNum < 60)
+      return "Unlock delay must be at least 60 seconds to ensure the transaction mines before the deadline.";
     if (!/^0x[0-9a-fA-F]{40}$/.test(recipient)) return "Enter a valid Ethereum address.";
     if (wallet && recipient.toLowerCase() === wallet.address.toLowerCase())
       return "You cannot send a payment to your own wallet address.";
@@ -95,54 +99,52 @@ export default function Create({ wallet, onConnect }: CreateProps) {
     try {
       setStep("encrypting");
 
-      let txHash: string | undefined;
-
-      if (CONTRACT_DEPLOYED && wallet) {
-        if (!wallet.signer.provider) throw new Error("Wallet provider not found");
-
-        const initRes = await cofhejs.initializeWithEthers({
-          ethersProvider: wallet.signer.provider,
-          ethersSigner: wallet.signer,
-          environment: "TESTNET",
-          generatePermit: false,
-        });
-        if (!initRes.success) {
-          console.error("[cofhejs] init error object:", initRes.error);
-          console.error("[cofhejs] init error code:", initRes.error?.code);
-          console.error("[cofhejs] init error cause:", initRes.error?.cause);
-          const detail = initRes.error?.cause?.message || initRes.error?.message || "Unknown error";
-          throw new Error("coFhe initialization failed: " + detail);
-        }
-
-        const amountWei = BigInt(Math.round(parseFloat(amount) * 1e18));
-        const encRes = await cofhejs.encrypt([Encryptable.uint64(amountWei)]);
-        
-        if (!encRes.success) throw new Error("FHE Encryption failed: " + encRes.error.message);
-        
-        const encryptedValue = encRes.data[0];
-        const unlockTimestamp = Math.floor(Date.now() / 1000) + delayNum;
-
-        setStep("sending");
-
-        const contract = new Contract(CONTRACT_ADDRESS, STEALTH_WALLET_ABI, wallet.signer);
-        // Send actual ETH alongside the call — the contract holds it until execution
-        const tx = await contract.setPayment(
-          {
-            ctHash: encryptedValue.ctHash,
-            securityZone: encryptedValue.securityZone,
-            utype: encryptedValue.utype,
-            signature: encryptedValue.signature,
-          },
-          unlockTimestamp,
-          recipient,
-          { value: parseEther(amount) }
-        ) as { hash: string; wait: () => Promise<unknown> };
-        txHash = tx.hash;
-        setStep("confirming");
-        await tx.wait();
-      } else {
+      if (!CONTRACT_DEPLOYED || !wallet) {
         throw new Error("Contract not deployed or wallet not connected");
       }
+      if (!wallet.signer.provider) throw new Error("Wallet provider not found");
+
+      // Initialize the new @cofhe/sdk client via ethers6 adapter
+      const { publicClient, walletClient } = await Ethers6Adapter(
+        wallet.signer.provider,
+        wallet.signer,
+      );
+      const cofheConfig = createCofheConfig({
+        network: {
+          chainId: ETH_SEPOLIA.chainIdNum,
+          rpcUrl: ETH_SEPOLIA.rpcUrls[0],
+        },
+      });
+      const cofheClient = createCofheClient(cofheConfig);
+      await cofheClient.connect({ publicClient, walletClient });
+
+      // Encrypt the payment amount using FHE
+      const amountWei = BigInt(Math.round(parseFloat(amount) * 1e18));
+      const [encryptedItem] = await cofheClient
+        .encryptInputs([Encryptable.uint64(amountWei)])
+        .setAccount(wallet.address)
+        .setChainId(ETH_SEPOLIA.chainIdNum)
+        .execute();
+
+      const unlockTimestamp = Math.floor(Date.now() / 1000) + delayNum;
+
+      setStep("sending");
+
+      const contract = new Contract(CONTRACT_ADDRESS, STEALTH_WALLET_ABI, wallet.signer);
+      const tx = (await contract.setPayment(
+        {
+          ctHash: encryptedItem.ctHash,
+          securityZone: encryptedItem.securityZone,
+          utype: encryptedItem.utype,
+          signature: encryptedItem.signature,
+        },
+        unlockTimestamp,
+        recipient,
+        { value: parseEther(amount) },
+      )) as { hash: string; wait: () => Promise<unknown> };
+
+      setStep("confirming");
+      await tx.wait();
 
       setStep("done");
       toast.success("Payment scheduled!", {
@@ -160,14 +162,17 @@ export default function Create({ wallet, onConnect }: CreateProps) {
     }
   };
 
-  /** Translate raw ethers / RPC errors into user-friendly messages */
   const parseTxError = (err: unknown): string => {
     const raw = err instanceof Error ? err.message : String(err);
     const lower = raw.toLowerCase();
 
     if (lower.includes("insufficient funds") || lower.includes("insufficient_funds"))
       return "Insufficient balance. Your wallet does not have enough ETH to cover the payment amount plus gas fees.";
-    if (lower.includes("user rejected") || lower.includes("user denied") || lower.includes("action_rejected"))
+    if (
+      lower.includes("user rejected") ||
+      lower.includes("user denied") ||
+      lower.includes("action_rejected")
+    )
       return "Transaction was rejected in your wallet.";
     if (lower.includes("nonce"))
       return "Transaction nonce conflict. Please reset your wallet activity or wait for pending transactions to confirm.";
@@ -175,12 +180,8 @@ export default function Create({ wallet, onConnect }: CreateProps) {
       return "Gas estimation failed. The transaction may revert on-chain. Please check your inputs.";
     if (lower.includes("network") || lower.includes("disconnect"))
       return "Network error. Please check your connection and ensure you are on Ethereum Sepolia.";
-    if (lower.includes("cofhe initialization failed"))
-      return raw;
-    if (lower.includes("fhe encryption failed"))
-      return raw;
+    if (lower.includes("encrypt")) return "FHE encryption failed: " + raw;
 
-    // Fallback: strip technical noise
     if (raw.length > 120) return "Transaction failed. Please check your balance and try again.";
     return raw;
   };
@@ -190,12 +191,12 @@ export default function Create({ wallet, onConnect }: CreateProps) {
       <PrivacyModal open={privacyOpen} onClose={() => setPrivacyOpen(false)} />
       <WalletGate wallet={wallet} onConnect={onConnect}>
         <div className="max-w-2xl mx-auto px-4 sm:px-6 py-10">
-
           {/* Header */}
           <div className="mb-8">
             <h1 className="text-2xl font-bold text-white">Create Confidential Payment</h1>
             <p className="text-sm text-gray-500 mt-1">
-              Amount is encrypted with FHE before being stored on-chain. Only you and the recipient can view payment details.{" "}
+              Amount is encrypted with FHE before being stored on-chain. Only you and the recipient
+              can view payment details.{" "}
               <button
                 onClick={() => setPrivacyOpen(true)}
                 className="text-violet-400 hover:text-violet-300 transition-colors"
@@ -206,7 +207,6 @@ export default function Create({ wallet, onConnect }: CreateProps) {
           </div>
 
           <div className="space-y-5">
-
             {/* Amount field */}
             <div className="space-y-2">
               <label className="flex items-center gap-1.5 text-xs font-medium text-gray-400 uppercase tracking-wider">
@@ -236,7 +236,8 @@ export default function Create({ wallet, onConnect }: CreateProps) {
               {amount && parseFloat(amount) > 0 && (
                 <p className="text-xs text-cyan-500/80 flex items-center gap-1">
                   <Info className="w-3 h-3 text-cyan-500" />
-                  {parseFloat(amount).toFixed(4)} ETH will be held in the contract and released to the recipient on execution
+                  {parseFloat(amount).toFixed(4)} ETH will be held in the contract and released to
+                  the recipient on execution
                 </p>
               )}
             </div>
@@ -248,7 +249,6 @@ export default function Create({ wallet, onConnect }: CreateProps) {
                 Unlock Delay (seconds)
               </label>
 
-              {/* Presets */}
               <div className="flex flex-wrap gap-2 mb-2">
                 {PRESETS.map(({ label, seconds }) => (
                   <button
@@ -281,9 +281,7 @@ export default function Create({ wallet, onConnect }: CreateProps) {
                 }`}
               />
               {delayNum > 0 && delayNum < 60 ? (
-                <p className="text-xs text-red-400">
-                  Minimum unlock delay is 60 seconds.
-                </p>
+                <p className="text-xs text-red-400">Minimum unlock delay is 60 seconds.</p>
               ) : delayNum >= 60 ? (
                 <p className="text-xs text-gray-500">
                   Unlocks in{" "}
@@ -320,8 +318,8 @@ export default function Create({ wallet, onConnect }: CreateProps) {
             {!CONTRACT_DEPLOYED && (
               <div className="flex items-start gap-2 px-4 py-3 rounded-xl bg-white/3 border border-white/6 text-xs text-gray-500">
                 <Info className="w-3.5 h-3.5 shrink-0 mt-0.5 text-gray-600" />
-                Contract not yet deployed to a live network. Payment will be recorded locally.
-                Deploy <code className="text-gray-400">StealthWallet.sol</code> and update{" "}
+                Contract not yet deployed to a live network. Deploy{" "}
+                <code className="text-gray-400">StealthWallet.sol</code> and update{" "}
                 <code className="text-gray-400">CONTRACT_ADDRESS</code> in{" "}
                 <code className="text-gray-400">src/lib/contract.ts</code>.
               </div>
@@ -336,7 +334,9 @@ export default function Create({ wallet, onConnect }: CreateProps) {
               {isLoading ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin" />
-                  {step === "encrypting" ? `Encrypting amount with FHE... (${encryptTime}s)` : STEP_LABELS[step]}
+                  {step === "encrypting"
+                    ? `Encrypting amount with FHE... (${encryptTime}s)`
+                    : STEP_LABELS[step]}
                 </>
               ) : (
                 <>
@@ -362,9 +362,7 @@ export default function Create({ wallet, onConnect }: CreateProps) {
                           : "bg-white/10"
                       }`}
                     />
-                    {s !== "confirming" && (
-                      <div className="w-6 h-px bg-white/10" />
-                    )}
+                    {s !== "confirming" && <div className="w-6 h-px bg-white/10" />}
                   </div>
                 ))}
               </div>

@@ -1,17 +1,17 @@
 /**
  * Execute.tsx
- * Shows all unlocked payments from the contract and lets users execute them.
+ * Shows all unlocked payments from the contract and lets the sender execute them.
  *
- * Two-phase flow (no inline oracle waiting):
- *   Phase 1 – "Request Decrypt": sends requestDecryptAmount tx, marks payment as
- *              oracle-pending in localStorage, then immediately returns.
- *   Phase 2 – "Complete Transfer": only shown once a background poll detects the
- *              oracle has responded (executePayment.staticCall succeeds). Calls
- *              executePayment directly with no timeout risk.
+ * New single-phase flow (replaces old oracle-based two-phase flow):
+ *   1. SDK calls Threshold Network directly to decrypt the amount (decryptForTx)
+ *   2. Publish the decryption result on-chain to the CoFHE TaskManager
+ *   3. Call executePayment — the contract reads the published result via getDecryptResultSafe
+ *
+ * Migrated to @cofhe/sdk (v0.4.0) — old fhenixjs/cofhejs decrypt flow deprecated.
  */
 
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Link, useLocation } from "wouter";
+import { Link } from "wouter";
 import {
   Zap,
   Clock,
@@ -22,7 +22,6 @@ import {
   ExternalLink,
   ArrowLeft,
   AlertTriangle,
-  Hourglass,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Contract } from "ethers";
@@ -33,25 +32,26 @@ import {
   CONTRACT_ADDRESS,
   CONTRACT_DEPLOYED,
   STEALTH_WALLET_ABI,
+  TASK_MANAGER_ADDRESS,
+  TASK_MANAGER_ABI,
+  ETH_SEPOLIA,
   formatUnlockTime,
   formatCountdown,
   ETHERSCAN_TX,
   ETHERSCAN_ADDR,
 } from "@/lib/contract";
-import {
-  saveTxHash,
-  loadTxMap,
-  markDecryptPending,
-  clearDecryptPending,
-  loadDecryptPending,
-} from "@/lib/txStorage";
+import { saveTxHash, loadTxMap } from "@/lib/txStorage";
 import type { ContractPayment } from "./Dashboard";
 import { getPaymentStatus } from "@/lib/paymentStatus";
+import { createCofheConfig, createCofheClient } from "@cofhe/sdk/web";
+import { Ethers6Adapter } from "@cofhe/sdk/adapters";
 
 interface ExecuteProps {
   wallet: WalletInfo | null;
   onConnect: (w: WalletInfo) => void;
 }
+
+type ExecPhase = "decrypting" | "publishing" | "executing";
 
 function LiveCountdown({ unlockTime }: { unlockTime: bigint }) {
   const [, setTick] = useState(0);
@@ -64,20 +64,19 @@ function LiveCountdown({ unlockTime }: { unlockTime: bigint }) {
   return <span className="tabular-nums">{formatCountdown(Math.round(diff))}</span>;
 }
 
+const PHASE_LABELS: Record<ExecPhase, string> = {
+  decrypting: "Decrypting via Threshold Network…",
+  publishing: "Publishing decrypt result on-chain…",
+  executing: "Sending payment…",
+};
+
 export default function Execute({ wallet, onConnect }: ExecuteProps) {
-  const [, navigate] = useLocation();
   const [payments, setPayments] = useState<ContractPayment[]>([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [executing, setExecuting] = useState<string | null>(null);
+  const [execPhase, setExecPhase] = useState<ExecPhase | null>(null);
   const [txMap, setTxMap] = useState<Record<string, string>>(() => loadTxMap());
-
-  // Payments where we've sent requestDecryptAmount but oracle hasn't responded yet
-  const [decryptPending, setDecryptPending] = useState<Record<string, boolean>>(
-    () => loadDecryptPending()
-  );
-  // Payments where the oracle has responded and executePayment is ready
-  const [oracleReady, setOracleReady] = useState<Set<string>>(new Set());
 
   const walletAddr = wallet?.address?.toLowerCase() ?? "";
   const contractRef = useRef<Contract | null>(null);
@@ -108,44 +107,13 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
       const authorized = all.filter(
         (p) =>
           p.sender?.toLowerCase() === walletAddr ||
-          p.recipient?.toLowerCase() === walletAddr
+          p.recipient?.toLowerCase() === walletAddr,
       );
       setPayments(authorized);
     } catch (err) {
       console.error("Failed to load payments:", err);
     }
   }, [wallet, walletAddr]);
-
-  /** Poll oracle-pending payments to see if executePayment is ready */
-  const pollOracleReady = useCallback(async () => {
-    const contract = contractRef.current;
-    if (!contract) return;
-    const pending = loadDecryptPending();
-    const ids = Object.keys(pending);
-    if (ids.length === 0) return;
-
-    const nowReady: string[] = [];
-    for (const id of ids) {
-      try {
-        await contract.executePayment.staticCall(BigInt(id));
-        nowReady.push(id);
-      } catch {
-        // Oracle hasn't responded yet for this one — keep waiting
-      }
-    }
-
-    if (nowReady.length > 0) {
-      for (const id of nowReady) {
-        clearDecryptPending(id);
-      }
-      setDecryptPending(loadDecryptPending());
-      setOracleReady((prev) => {
-        const next = new Set(prev);
-        for (const id of nowReady) next.add(id);
-        return next;
-      });
-    }
-  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -155,95 +123,113 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
 
   useEffect(() => {
     load();
-    // Refresh payment list every 10s
-    const paymentInterval = setInterval(loadPayments, 10000);
-    // Poll oracle status every 5s (lightweight staticCall)
-    const oracleInterval = setInterval(pollOracleReady, 5000);
-    return () => {
-      clearInterval(paymentInterval);
-      clearInterval(oracleInterval);
-    };
-  }, [load, loadPayments, pollOracleReady]);
+    const interval = setInterval(loadPayments, 10000);
+    return () => clearInterval(interval);
+  }, [load, loadPayments]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
     await load();
-    await pollOracleReady();
     setRefreshing(false);
   };
 
   /**
-   * Phase 1: send requestDecryptAmount and persist pending state.
-   * Returns immediately — the oracle poll will detect when it's done.
+   * New single-step execute flow using @cofhe/sdk:
+   *   1. decryptForTx  → Threshold Network returns decryptedValue + signature
+   *   2. publishDecryptResult → writes result to CoFHE TaskManager on-chain
+   *   3. executePayment → contract reads result via FHE.getDecryptResultSafe
    */
-  const handleRequestDecrypt = async (payment: ContractPayment) => {
+  const handleExecute = async (payment: ContractPayment) => {
     if (!wallet || !contractRef.current) return;
     const key = String(payment.id ?? "?");
     setExecuting(key);
+
     try {
       const contract = contractRef.current;
-      const tx = await contract.requestDecryptAmount(payment.id) as { hash: string; wait: () => Promise<unknown> };
-      saveTxHash(key + "_decrypt", tx.hash);
-      await tx.wait();
 
-      markDecryptPending(key);
-      setDecryptPending(loadDecryptPending());
+      // --- Step 1: Fetch ctHash and set up SDK client ---
+      setExecPhase("decrypting");
 
-      toast.info("Decryption requested. The oracle is processing — check back shortly to complete the transfer.", {
-        duration: 8000,
+      const { publicClient, walletClient } = await Ethers6Adapter(
+        wallet.signer.provider!,
+        wallet.signer,
+      );
+      const cofheConfig = createCofheConfig({
+        network: {
+          chainId: ETH_SEPOLIA.chainIdNum,
+          rpcUrl: ETH_SEPOLIA.rpcUrls[0],
+        },
       });
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Request failed";
-      toast.error("Decrypt request failed", { description: msg });
-    } finally {
+      const cofheClient = createCofheClient(cofheConfig);
+      await cofheClient.connect({ publicClient, walletClient });
+
+      const ctHash = (await contract.getEncryptedAmount(payment.id)) as bigint;
+
+      // Decrypt via Threshold Network (new flow — no oracle required)
+      const decryptResult = await cofheClient
+        .decryptForTx(ctHash)
+        .setAccount(wallet.address)
+        .setChainId(ETH_SEPOLIA.chainIdNum)
+        .withoutPermit()
+        .execute();
+
+      // --- Step 2: Publish decrypt result to TaskManager ---
+      setExecPhase("publishing");
+
+      const taskManager = new Contract(TASK_MANAGER_ADDRESS, TASK_MANAGER_ABI, wallet.signer);
+      const publishTx = (await taskManager.publishDecryptResult(
+        BigInt(decryptResult.ctHash as bigint),
+        decryptResult.decryptedValue,
+        decryptResult.signature,
+      )) as { hash: string; wait: () => Promise<unknown> };
+      await publishTx.wait();
+
+      // --- Step 3: Execute the payment ---
+      setExecPhase("executing");
+
+      const execTx = (await contract.executePayment(payment.id)) as {
+        hash: string;
+        wait: () => Promise<unknown>;
+      };
+
+      saveTxHash(key, execTx.hash);
+      setTxMap((prev) => ({ ...prev, [key]: execTx.hash }));
+
       setExecuting(null);
-    }
-  };
+      setExecPhase(null);
 
-  /**
-   * Phase 2: oracle has confirmed — call executePayment directly, no polling needed.
-   */
-  const handleCompleteTransfer = async (payment: ContractPayment) => {
-    if (!wallet || !contractRef.current) return;
-    const key = String(payment.id ?? "?");
-    setExecuting(key);
-    try {
-      const contract = contractRef.current;
-      const tx = await contract.executePayment(payment.id) as { hash: string; wait: () => Promise<unknown> };
-
-      saveTxHash(key, tx.hash);
-      setTxMap((prev) => ({ ...prev, [key]: tx.hash }));
-      setOracleReady((prev) => {
-        const next = new Set(prev);
-        next.delete(key);
-        return next;
-      });
-      setExecuting(null);
-
-      toast.success("Transaction submitted!", {
+      toast.success("Payment executed!", {
         description: (
           <span>
-            Payment executed for {shortenAddress(payment.recipient)}.{" "}
-            <a href={ETHERSCAN_TX(tx.hash)} target="_blank" rel="noopener noreferrer" className="underline font-medium">
+            Sent to {shortenAddress(payment.recipient)}.{" "}
+            <a
+              href={ETHERSCAN_TX(execTx.hash)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline font-medium"
+            >
               View on Etherscan ↗
             </a>
-            <br />
-            <button
-              onClick={() => navigate(`/receipts#receipt-${key}`)}
-              className="text-violet-400 underline font-medium text-xs mt-1 inline-block"
-            >
-              View Receipt →
-            </button>
           </span>
         ) as unknown as string,
         duration: 12000,
       });
 
-      tx.wait().then(() => loadPayments()).catch(console.error);
+      execTx.wait().then(() => loadPayments()).catch(console.error);
     } catch (err: unknown) {
       setExecuting(null);
+      setExecPhase(null);
       const msg = err instanceof Error ? err.message : "Execution failed";
-      toast.error("Execution failed", { description: msg });
+      const lower = msg.toLowerCase();
+      const friendly =
+        lower.includes("user rejected") || lower.includes("action_rejected")
+          ? "Transaction was rejected in your wallet."
+          : lower.includes("decryption not ready")
+          ? "Decryption not ready yet. Please wait a moment and try again."
+          : msg.length > 120
+          ? "Execution failed. Please try again."
+          : msg;
+      toast.error("Execution failed", { description: friendly });
     }
   };
 
@@ -256,13 +242,13 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
   return (
     <WalletGate wallet={wallet} onConnect={onConnect}>
       <div className="max-w-5xl mx-auto px-4 sm:px-6 py-10 space-y-8">
-
         {/* Header */}
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-bold text-white">Execute Confidential Transfers</h1>
             <p className="text-sm text-gray-500 mt-0.5">
-              Release encrypted funds once conditions are met, verified on-chain without revealing sensitive data.
+              Release encrypted funds once conditions are met, verified on-chain without revealing
+              sensitive data.
             </p>
           </div>
           <button
@@ -310,13 +296,11 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
               <div className="space-y-3">
                 {ready.map((payment) => {
                   const key = String(payment.id ?? "?");
-                  const isExecuting   = executing === key;
-                  const isSender      = payment.sender?.toLowerCase() === walletAddr;
-                  const isRecipient   = payment.recipient?.toLowerCase() === walletAddr;
-                  const status        = getPaymentStatus(payment, walletAddr, txMap);
-                  const isSending     = status === "sending";
-                  const isPendingOracle = decryptPending[key];
-                  const isOracleReady = oracleReady.has(key);
+                  const isExecuting = executing === key;
+                  const isSender = payment.sender?.toLowerCase() === walletAddr;
+                  const isRecipient = payment.recipient?.toLowerCase() === walletAddr;
+                  const status = getPaymentStatus(payment, walletAddr, txMap);
+                  const isSending = status === "sending";
 
                   return (
                     <div
@@ -324,30 +308,20 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
                       className={`p-5 rounded-xl border transition-colors ${
                         isSending
                           ? "bg-blue-500/5 border-blue-500/20"
-                          : isPendingOracle
-                          ? "bg-amber-500/5 border-amber-500/15"
-                          : isOracleReady
-                          ? "bg-violet-500/5 border-violet-500/15 hover:border-violet-500/25"
+                          : isExecuting
+                          ? "bg-violet-500/5 border-violet-500/15"
                           : "bg-emerald-500/5 border-emerald-500/15 hover:border-emerald-500/25"
                       }`}
                     >
                       <div className="flex items-center justify-between gap-4">
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2 mb-2">
-                            {isSending ? (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium text-blue-400 bg-blue-400/8 border border-blue-400/20">
-                                <Loader2 className="w-3 h-3 animate-spin" />
-                                Sending…
-                              </span>
-                            ) : isPendingOracle ? (
-                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium text-amber-400 bg-amber-400/8 border border-amber-400/15">
-                                <Hourglass className="w-3 h-3" />
-                                Awaiting Oracle
-                              </span>
-                            ) : isOracleReady ? (
+                            {isSending || isExecuting ? (
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium text-violet-400 bg-violet-400/8 border border-violet-400/15">
-                                <CheckCircle2 className="w-3 h-3" />
-                                Oracle Ready
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                                {isExecuting && execPhase
+                                  ? PHASE_LABELS[execPhase]
+                                  : "Processing…"}
                               </span>
                             ) : (
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium text-cyan-400 bg-cyan-400/8 border border-cyan-400/15">
@@ -355,13 +329,7 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
                                 Ready
                               </span>
                             )}
-                            <span className="text-xs text-gray-500">
-                              {isSending
-                                ? "Confirming on-chain…"
-                                : isPendingOracle
-                                ? "Decryption in progress — page will update automatically"
-                                : `Payment #${key}`}
-                            </span>
+                            <span className="text-xs text-gray-500">Payment #{key}</span>
                           </div>
                           <div className="flex items-center gap-3 flex-wrap">
                             <div className="flex items-center gap-1.5">
@@ -383,48 +351,25 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
                           </div>
                         </div>
 
-                        {/* Action buttons */}
+                        {/* Action button — only sender can execute */}
                         {isSending && (
                           <Loader2 className="shrink-0 w-5 h-5 text-blue-400 animate-spin" />
                         )}
 
-                        {!isSending && isSender && isPendingOracle && (
-                          <div className="shrink-0 flex items-center gap-1.5 text-amber-400/70">
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                            <span className="text-xs font-medium">Waiting…</span>
-                          </div>
-                        )}
-
-                        {!isSending && isSender && isOracleReady && (
+                        {!isSending && isSender && (
                           <button
-                            onClick={() => handleCompleteTransfer(payment)}
-                            disabled={executing !== null}
-                            className="shrink-0 flex items-center gap-1.5 px-4 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 disabled:opacity-60 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors shadow-lg shadow-violet-600/15"
-                          >
-                            {isExecuting ? (
-                              <>
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                Sending…
-                              </>
-                            ) : (
-                              <>
-                                <Zap className="w-3.5 h-3.5" />
-                                Complete Transfer
-                              </>
-                            )}
-                          </button>
-                        )}
-
-                        {!isSending && isSender && !isPendingOracle && !isOracleReady && (
-                          <button
-                            onClick={() => handleRequestDecrypt(payment)}
+                            onClick={() => handleExecute(payment)}
                             disabled={executing !== null}
                             className="shrink-0 flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 disabled:cursor-not-allowed text-white text-sm font-semibold transition-colors shadow-lg shadow-emerald-600/15"
                           >
                             {isExecuting ? (
                               <>
                                 <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                                Requesting…
+                                {execPhase === "decrypting"
+                                  ? "Decrypting…"
+                                  : execPhase === "publishing"
+                                  ? "Publishing…"
+                                  : "Sending…"}
                               </>
                             ) : (
                               <>
@@ -458,7 +403,7 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
             <div className="space-y-3">
               {locked.map((payment) => {
                 const key = String(payment.id ?? "?");
-                const isSender    = payment.sender?.toLowerCase() === walletAddr;
+                const isSender = payment.sender?.toLowerCase() === walletAddr;
                 const isRecipient = payment.recipient?.toLowerCase() === walletAddr;
                 return (
                   <div
@@ -511,11 +456,12 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
             </h2>
             <div className="space-y-2">
               {recentExecuted.map((payment) => {
-                const isSender    = payment.sender?.toLowerCase() === walletAddr;
+                const key = String(payment.id ?? "?");
                 const isRecipient = payment.recipient?.toLowerCase() === walletAddr;
+                const isSender = payment.sender?.toLowerCase() === walletAddr;
                 return (
                   <div
-                    key={String(payment.id ?? "?")}
+                    key={key}
                     className="flex items-center justify-between gap-4 px-5 py-4 rounded-xl bg-white/[0.02] border border-white/5"
                   >
                     <div className="flex items-center gap-3 min-w-0">
@@ -538,7 +484,8 @@ export default function Execute({ wallet, onConnect }: ExecuteProps) {
                           </a>
                         </div>
                         <p className="text-xs text-gray-600 mt-0.5">
-                          Payment #{String(payment.id ?? "?")} · Unlocked {payment.unlockTime ? formatUnlockTime(payment.unlockTime) : "—"}
+                          Payment #{key} · Unlocked{" "}
+                          {payment.unlockTime ? formatUnlockTime(payment.unlockTime) : "—"}
                         </p>
                       </div>
                     </div>
