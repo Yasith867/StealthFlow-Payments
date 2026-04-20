@@ -46,6 +46,7 @@ import {
   loadHistory,
   clearHistoryKeys,
 } from "@/lib/historyStorage";
+import { promotePendingLabel, loadAllLabels } from "@/lib/labels";
 
 interface DashboardProps {
   wallet: WalletInfo | null;
@@ -114,6 +115,7 @@ export default function Dashboard({ wallet, onConnect }: DashboardProps) {
   const [showBalance, setShowBalance] = useState(false);
   const [walletBalance, setWalletBalance] = useState<string | null>(null);
   const [balanceLoading, setBalanceLoading] = useState(false);
+  const [labels, setLabels] = useState<Record<string, string>>(() => loadAllLabels());
 
   const walletAddr = wallet?.address?.toLowerCase() ?? "";
 
@@ -148,6 +150,11 @@ export default function Dashboard({ wallet, onConnect }: DashboardProps) {
           p.recipient?.toLowerCase() === walletAddr
       );
       const result = authorized.reverse();
+      // Promote any pending labels to payment IDs now that we have IDs
+      result.forEach((p) => {
+        promotePendingLabel(Number(p.unlockTime), p.recipient ?? "", p.id ?? 0n);
+      });
+      setLabels(loadAllLabels());
       setPayments(result);
       // Persist for next session
       saveHistory(historyKey(walletAddr), result);
@@ -508,6 +515,12 @@ export default function Dashboard({ wallet, onConnect }: DashboardProps) {
                         </a>
                       </div>
 
+                      {labels[`payment:${key}`] && (
+                        <p className="text-xs text-gray-500 mt-1 flex items-center gap-1">
+                          <span className="text-gray-600">Memo:</span>
+                          <span className="text-gray-400">{labels[`payment:${key}`]}</span>
+                        </p>
+                      )}
                       <p className="text-xs text-gray-600 mt-1">
                         Unlock: {formatUnlockTime(payment.unlockTime)}
                       </p>

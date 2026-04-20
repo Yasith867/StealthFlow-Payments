@@ -5,7 +5,7 @@
 
 import { useState } from "react";
 import { Link } from "wouter";
-import { Shield, Lock, Clock, Zap, ArrowRight, ChevronRight } from "lucide-react";
+import { Shield, Lock, Clock, Zap, ArrowRight, ChevronRight, Eye, EyeOff, ExternalLink } from "lucide-react";
 import PrivacyModal from "@/components/PrivacyModal";
 
 const FEATURES = [
@@ -49,6 +49,122 @@ const COLOR_MAP = {
     glow: "shadow-emerald-500/10",
   },
 };
+
+// A realistic-looking Sepolia Etherscan tx mock demonstrating FHE privacy
+function PrivacyProofPanel() {
+  const [revealed, setRevealed] = useState(false);
+
+  return (
+    <section className="max-w-5xl mx-auto px-4 pb-24">
+      <div className="text-center mb-10">
+        <h2 className="text-2xl font-bold text-white mb-3">Privacy by default — proven on-chain</h2>
+        <p className="text-gray-500 text-sm max-w-lg mx-auto">
+          Anyone can inspect the contract on Etherscan. Here's what they see vs. what you see.
+        </p>
+      </div>
+
+      <div className="grid sm:grid-cols-2 gap-4">
+        {/* What the world sees */}
+        <div className="rounded-2xl border border-white/8 overflow-hidden">
+          <div className="flex items-center gap-2 px-4 py-3 bg-white/[0.03] border-b border-white/6">
+            <Eye className="w-3.5 h-3.5 text-gray-500" />
+            <span className="text-xs font-medium text-gray-400">What the world sees on Etherscan</span>
+          </div>
+          <div className="p-4 font-mono text-xs space-y-3">
+            <div className="space-y-1">
+              <p className="text-gray-600 uppercase tracking-wide text-[10px]">Function</p>
+              <p className="text-gray-300">setPayment</p>
+            </div>
+            <div className="space-y-1">
+              <p className="text-gray-600 uppercase tracking-wide text-[10px]">Encrypted Amount (ctHash)</p>
+              <p className="text-amber-400/80 break-all leading-relaxed">
+                0x7f4a2c1d9e3b8f0a…e291bc74
+              </p>
+            </div>
+            <div className="space-y-1">
+              <p className="text-gray-600 uppercase tracking-wide text-[10px]">Security Zone</p>
+              <p className="text-gray-400">0</p>
+            </div>
+            <div className="space-y-1">
+              <p className="text-gray-600 uppercase tracking-wide text-[10px]">Unlock Time</p>
+              <p className="text-gray-400">1744041600</p>
+            </div>
+            <div className="space-y-1">
+              <p className="text-gray-600 uppercase tracking-wide text-[10px]">Recipient</p>
+              <p className="text-gray-400">0xRecipient…Address</p>
+            </div>
+            <div className="mt-3 pt-3 border-t border-white/5">
+              <a
+                href="https://sepolia.etherscan.io/address/0x7091056ca13fd6a2e09d0bc4944e87a0b6b909cb"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 text-[11px] text-gray-600 hover:text-gray-400 transition-colors"
+              >
+                <ExternalLink className="w-3 h-3" />
+                View real contract on Sepolia Etherscan
+              </a>
+            </div>
+          </div>
+        </div>
+
+        {/* What you see in StealthFlow */}
+        <div className="rounded-2xl border border-violet-500/20 overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-3 bg-violet-500/6 border-b border-violet-500/15">
+            <div className="flex items-center gap-2">
+              <Shield className="w-3.5 h-3.5 text-violet-400" />
+              <span className="text-xs font-medium text-violet-300">What you see in StealthFlow</span>
+            </div>
+            <button
+              onClick={() => setRevealed((r) => !r)}
+              className="flex items-center gap-1 text-[11px] text-violet-400 hover:text-violet-300 transition-colors"
+            >
+              {revealed ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+              {revealed ? "Hide" : "Reveal"}
+            </button>
+          </div>
+          <div className="p-4 font-mono text-xs space-y-3">
+            <div className="space-y-1">
+              <p className="text-gray-600 uppercase tracking-wide text-[10px]">Payment</p>
+              <p className="text-gray-300">#42 · Confidential Transfer</p>
+            </div>
+            <div className="space-y-1">
+              <p className="text-gray-600 uppercase tracking-wide text-[10px]">Amount</p>
+              {revealed ? (
+                <p className="text-emerald-400 font-bold text-sm">0.1500 ETH</p>
+              ) : (
+                <p className="text-violet-300/70 flex items-center gap-1.5">
+                  <Lock className="w-3 h-3" />
+                  Encrypted — only you can see this
+                </p>
+              )}
+            </div>
+            <div className="space-y-1">
+              <p className="text-gray-600 uppercase tracking-wide text-[10px]">Unlock Time</p>
+              <p className="text-gray-400">Apr 7, 2025, 12:00 PM</p>
+            </div>
+            <div className="space-y-1">
+              <p className="text-gray-600 uppercase tracking-wide text-[10px]">Recipient</p>
+              <p className="text-gray-400">0xRecipient…Address</p>
+            </div>
+            <div className="space-y-1">
+              <p className="text-gray-600 uppercase tracking-wide text-[10px]">Status</p>
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium text-emerald-400 bg-emerald-400/10 border border-emerald-400/20">
+                <Zap className="w-2.5 h-2.5" />
+                Ready to execute
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <p className="text-center text-xs text-gray-600 mt-4">
+        The encrypted ciphertext (ctHash) is computed using{" "}
+        <span className="text-gray-500">Fhenix CoFHE</span> — a Threshold FHE system.
+        The smart contract operates on the encrypted value without ever decrypting it on-chain.
+      </p>
+    </section>
+  );
+}
 
 export default function Landing() {
   const [privacyOpen, setPrivacyOpen] = useState(false);
@@ -175,6 +291,9 @@ export default function Landing() {
             })}
           </div>
         </section>
+
+        {/* Privacy Proof Panel */}
+        <PrivacyProofPanel />
 
         {/* CTA */}
         <section className="max-w-5xl mx-auto px-4 pb-24">

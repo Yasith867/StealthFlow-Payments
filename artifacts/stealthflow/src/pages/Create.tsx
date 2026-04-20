@@ -2,10 +2,12 @@
  * Create.tsx
  * Form to schedule a new encrypted payment.
  * Migrated to @cofhe/sdk (v0.4.0) — cofhejs deprecated.
+ * Upgrades: ENS resolution, payment memos, more presets, soft self-payment warning,
+ *           payment request link generation, URL pre-fill support.
  */
 
-import { useState, useEffect } from "react";
-import { useLocation } from "wouter";
+import { useState, useEffect, useRef } from "react";
+import { useLocation, useSearch } from "wouter";
 import {
   Lock,
   Clock,
@@ -14,6 +16,10 @@ import {
   Loader2,
   AlertCircle,
   Info,
+  Link2,
+  Check,
+  MessageSquare,
+  AlertTriangle,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Contract, parseEther } from "ethers";
@@ -30,6 +36,8 @@ import {
 import { createCofheConfig, createCofheClient } from "@cofhe/sdk/web";
 import { Ethers6Adapter } from "@cofhe/sdk/adapters";
 import { Encryptable } from "@cofhe/sdk";
+import { resolveEns, isEnsName } from "@/lib/ens";
+import { saveLabelPending } from "@/lib/labels";
 
 interface CreateProps {
   wallet: WalletInfo | null;
@@ -48,20 +56,42 @@ const STEP_LABELS: Record<Step, string> = {
 
 const PRESETS = [
   { label: "1 min", seconds: 60 },
-  { label: "1 hour", seconds: 3600 },
+  { label: "1 hr", seconds: 3600 },
   { label: "1 day", seconds: 86400 },
+  { label: "3 days", seconds: 259200 },
   { label: "1 week", seconds: 604800 },
+  { label: "30 days", seconds: 2592000 },
 ];
 
 export default function Create({ wallet, onConnect }: CreateProps) {
   const [, navigate] = useLocation();
-  const [amount, setAmount] = useState("");
-  const [delay, setDelay] = useState("");
-  const [recipient, setRecipient] = useState("");
+  const search = useSearch();
+
+  // Parse URL query params for payment request pre-fill
+  const params = new URLSearchParams(search);
+  const prefillRecipient = params.get("recipient") ?? "";
+  const prefillAmount = params.get("amount") ?? "";
+  const prefillDelay = params.get("delay") ?? "";
+  const prefillMemo = params.get("memo") ?? "";
+
+  const [amount, setAmount] = useState(prefillAmount);
+  const [delay, setDelay] = useState(prefillDelay);
+  const [recipient, setRecipient] = useState(prefillRecipient);
+  const [memo, setMemo] = useState(prefillMemo);
   const [step, setStep] = useState<Step>("idle");
   const [error, setError] = useState("");
   const [privacyOpen, setPrivacyOpen] = useState(false);
   const [encryptTime, setEncryptTime] = useState(0);
+
+  // ENS resolution state
+  const [ensInput, setEnsInput] = useState(isEnsName(prefillRecipient) ? prefillRecipient : "");
+  const [ensResolved, setEnsResolved] = useState(isEnsName(prefillRecipient) ? prefillRecipient : "");
+  const [ensLoading, setEnsLoading] = useState(false);
+  const [ensError, setEnsError] = useState("");
+  const ensDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Copy payment request link
+  const [linkCopied, setLinkCopied] = useState(false);
 
   useEffect(() => {
     let interval: ReturnType<typeof setInterval>;
@@ -74,17 +104,44 @@ export default function Create({ wallet, onConnect }: CreateProps) {
     };
   }, [step]);
 
+  // ENS debounced resolution
+  const handleRecipientChange = (value: string) => {
+    setRecipient(value);
+    setEnsError("");
+
+    if (isEnsName(value)) {
+      setEnsInput(value);
+      setEnsResolved("");
+      if (ensDebounceRef.current) clearTimeout(ensDebounceRef.current);
+      ensDebounceRef.current = setTimeout(async () => {
+        setEnsLoading(true);
+        const address = await resolveEns(value);
+        setEnsLoading(false);
+        if (address) {
+          setEnsResolved(address);
+          setRecipient(address);
+        } else {
+          setEnsError("ENS name not found or could not be resolved.");
+        }
+      }, 600);
+    } else {
+      setEnsInput("");
+      setEnsResolved("");
+    }
+  };
+
   const delayNum = parseInt(delay, 10) || 0;
   const isLoading = step !== "idle" && step !== "done";
+  const isSelfPayment =
+    wallet && recipient && /^0x[0-9a-fA-F]{40}$/.test(recipient) &&
+    recipient.toLowerCase() === wallet.address.toLowerCase();
 
   const validate = (): string | null => {
     const amt = parseFloat(amount);
     if (!amount || isNaN(amt) || amt <= 0) return "Amount must be a positive number.";
     if (!delay || delayNum < 60)
       return "Unlock delay must be at least 60 seconds to ensure the transaction mines before the deadline.";
-    if (!/^0x[0-9a-fA-F]{40}$/.test(recipient)) return "Enter a valid Ethereum address.";
-    if (wallet && recipient.toLowerCase() === wallet.address.toLowerCase())
-      return "You cannot send a payment to your own wallet address.";
+    if (!/^0x[0-9a-fA-F]{40}$/.test(recipient)) return "Enter a valid Ethereum address (or a .eth ENS name).";
     return null;
   };
 
@@ -146,6 +203,12 @@ export default function Create({ wallet, onConnect }: CreateProps) {
       setStep("confirming");
       await tx.wait();
 
+      // Save memo locally with unlock timestamp + recipient as the key.
+      // Dashboard will promote this to payment:{id} once the ID is known.
+      if (memo.trim()) {
+        saveLabelPending(unlockTimestamp, recipient, memo.trim());
+      }
+
       setStep("done");
       toast.success("Payment scheduled!", {
         description: `${parseFloat(amount).toFixed(4)} ETH locked in contract · unlocks in ${formatCountdown(delayNum)}`,
@@ -184,6 +247,23 @@ export default function Create({ wallet, onConnect }: CreateProps) {
 
     if (raw.length > 120) return "Transaction failed. Please check your balance and try again.";
     return raw;
+  };
+
+  const handleCopyPaymentRequest = () => {
+    if (!wallet) return;
+    const base = window.location.origin;
+    const p = new URLSearchParams();
+    p.set("recipient", wallet.address);
+    if (amount) p.set("amount", amount);
+    if (delay) p.set("delay", delay);
+    if (memo) p.set("memo", memo);
+    const url = `${base}/create?${p.toString()}`;
+    navigator.clipboard.writeText(url);
+    setLinkCopied(true);
+    toast.success("Payment request link copied!", {
+      description: "Share this link so someone can send you an encrypted payment.",
+    });
+    setTimeout(() => setLinkCopied(false), 2000);
   };
 
   return (
@@ -294,16 +374,69 @@ export default function Create({ wallet, onConnect }: CreateProps) {
             <div className="space-y-2">
               <label className="flex items-center gap-1.5 text-xs font-medium text-gray-400 uppercase tracking-wider">
                 <User className="w-3 h-3 text-gray-400" />
-                Recipient Address
+                Recipient Address or ENS Name
+              </label>
+              <div className="relative">
+                <input
+                  type="text"
+                  placeholder="0x... or name.eth"
+                  value={ensInput || recipient}
+                  onChange={(e) => handleRecipientChange(e.target.value)}
+                  disabled={isLoading}
+                  className={`w-full px-4 py-3 rounded-xl bg-white/4 border text-white placeholder-gray-700 text-sm font-mono focus:outline-none focus:ring-1 transition-all disabled:opacity-50 ${
+                    ensError
+                      ? "border-red-500/40 focus:border-red-500/40 focus:ring-red-500/15"
+                      : ensResolved
+                      ? "border-emerald-500/30 focus:border-emerald-500/40 focus:ring-emerald-500/15"
+                      : "border-white/8 focus:border-violet-500/40 focus:ring-violet-500/15"
+                  }`}
+                />
+                {ensLoading && (
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-gray-500" />
+                  </div>
+                )}
+                {ensResolved && !ensLoading && (
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2">
+                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                  </div>
+                )}
+              </div>
+              {ensResolved && (
+                <p className="text-xs text-emerald-400 flex items-center gap-1 font-mono">
+                  <Check className="w-3 h-3" />
+                  Resolved: {ensResolved.slice(0, 10)}…{ensResolved.slice(-8)}
+                </p>
+              )}
+              {ensError && (
+                <p className="text-xs text-red-400">{ensError}</p>
+              )}
+              {isSelfPayment && (
+                <div className="flex items-start gap-1.5 text-xs text-amber-400/90 mt-1">
+                  <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />
+                  You're sending to your own address. This is allowed but you won't receive a separate "incoming" notification.
+                </div>
+              )}
+            </div>
+
+            {/* Memo field */}
+            <div className="space-y-2">
+              <label className="flex items-center gap-1.5 text-xs font-medium text-gray-400 uppercase tracking-wider">
+                <MessageSquare className="w-3 h-3 text-gray-500" />
+                Memo (optional, stored locally)
               </label>
               <input
                 type="text"
-                placeholder="0x..."
-                value={recipient}
-                onChange={(e) => setRecipient(e.target.value)}
+                placeholder="e.g. Rent · July, Project milestone, Gift..."
+                value={memo}
+                onChange={(e) => setMemo(e.target.value)}
                 disabled={isLoading}
-                className="w-full px-4 py-3 rounded-xl bg-white/4 border border-white/8 text-white placeholder-gray-700 text-sm font-mono focus:outline-none focus:border-violet-500/40 focus:ring-1 focus:ring-violet-500/15 transition-all disabled:opacity-50"
+                maxLength={120}
+                className="w-full px-4 py-3 rounded-xl bg-white/4 border border-white/8 text-white placeholder-gray-700 text-sm focus:outline-none focus:border-white/15 focus:ring-1 focus:ring-white/8 transition-all disabled:opacity-50"
               />
+              <p className="text-xs text-gray-700">
+                Never stored on-chain. Only visible on this device.
+              </p>
             </div>
 
             {/* Error */}
@@ -328,7 +461,7 @@ export default function Create({ wallet, onConnect }: CreateProps) {
             {/* Submit */}
             <button
               onClick={handleSubmit}
-              disabled={isLoading}
+              disabled={isLoading || ensLoading}
               className="w-full flex items-center justify-center gap-2 py-3.5 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-60 disabled:cursor-not-allowed text-white text-sm font-semibold transition-all shadow-lg shadow-violet-600/20 hover:shadow-violet-600/35"
             >
               {isLoading ? (
@@ -365,6 +498,26 @@ export default function Create({ wallet, onConnect }: CreateProps) {
                     {s !== "confirming" && <div className="w-6 h-px bg-white/10" />}
                   </div>
                 ))}
+              </div>
+            )}
+
+            {/* Payment Request Link */}
+            {wallet && !isLoading && (
+              <div className="pt-2 border-t border-white/6">
+                <p className="text-xs text-gray-600 mb-2">
+                  Want someone to pay <span className="text-gray-500 font-medium">you</span>? Generate a pre-filled link they can open.
+                </p>
+                <button
+                  onClick={handleCopyPaymentRequest}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl w-full bg-white/3 hover:bg-white/6 border border-white/8 hover:border-white/12 text-gray-400 hover:text-gray-200 text-sm transition-all"
+                >
+                  {linkCopied ? (
+                    <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                  ) : (
+                    <Link2 className="w-3.5 h-3.5 shrink-0" />
+                  )}
+                  {linkCopied ? "Link copied!" : "Copy payment request link"}
+                </button>
               </div>
             )}
           </div>

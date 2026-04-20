@@ -33,6 +33,7 @@ import {
 import type { ContractPayment } from "./Dashboard";
 import { loadTxMap } from "@/lib/txStorage";
 import { receiptsKey, saveHistory, loadHistory } from "@/lib/historyStorage";
+import { promotePendingLabel, loadAllLabels } from "@/lib/labels";
 
 interface ReceiptsProps {
   wallet: WalletInfo | null;
@@ -64,6 +65,7 @@ export default function Receipts({ wallet, onConnect }: ReceiptsProps) {
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [txMap, setTxMap] = useState<Record<string, string>>({});
+  const [labels, setLabels] = useState<Record<string, string>>(() => loadAllLabels());
   const [activeTab, setActiveTab] = useState<Tab>("received");
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -103,6 +105,11 @@ export default function Receipts({ wallet, onConnect }: ReceiptsProps) {
               p.sender?.toLowerCase() === walletAddr)
         )
         .reverse();
+      // Promote any pending labels to payment IDs
+      authorized.forEach((p) => {
+        promotePendingLabel(Number(p.unlockTime), p.recipient ?? "", p.id ?? 0n);
+      });
+      setLabels(loadAllLabels());
       setAllPayments(authorized);
       // Persist for next session
       saveHistory(receiptsKey(walletAddr), authorized);
@@ -367,6 +374,14 @@ export default function Receipts({ wallet, onConnect }: ReceiptsProps) {
                         {payment.unlockTime ? formatUnlockTime(payment.unlockTime) : "—"}
                       </span>
                     </div>
+
+                    {/* Memo */}
+                    {labels[`payment:${id}`] && (
+                      <div className="flex items-center justify-between gap-4">
+                        <span className="text-xs text-gray-500 uppercase tracking-wide shrink-0">Memo</span>
+                        <span className="text-sm text-gray-300 italic">{labels[`payment:${id}`]}</span>
+                      </div>
+                    )}
 
                     {/* TX Hash */}
                     <div className="flex items-center justify-between gap-4">
