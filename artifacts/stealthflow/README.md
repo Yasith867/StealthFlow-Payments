@@ -1,146 +1,138 @@
-# StealthFlow — Private Condition Wallet
+# StealthFlow
 
-A privacy-first Web3 dApp that lets you schedule payments with **encrypted amounts** using Fhenix's Fully Homomorphic Encryption (FHE).
+Privacy-first confidential payment infrastructure on Ethereum Sepolia, powered by Fhenix Fully Homomorphic Encryption (FHE).
 
-## What is FHE?
+Schedule time-locked payments where the amount stays fully encrypted on-chain — from creation through execution. Nobody except the sender and recipient can see what was transferred.
 
-**Fully Homomorphic Encryption (FHE)** is a form of encryption that allows computations to be performed directly on encrypted data — without decrypting it first.
-
-In StealthFlow:
-- Your payment amount is **encrypted on the client side** before it ever leaves your browser
-- The encrypted value is stored on the Fhenix blockchain
-- The smart contract uses the encrypted value internally — it **never knows the plaintext amount**
-- No miner, validator, or observer can determine the payment amount
-
-## How Encryption Works in This App
-
-1. You enter an amount (e.g., `0.5 ETH`)
-2. The frontend encrypts it into a `euint64` ciphertext using Fhenix's FHE library
-3. The ciphertext is sent to the `StealthWallet` contract via `setPayment()`
-4. The contract stores `encryptedAmount` — an opaque blob that hides the real value
-5. When the time condition is met and `executePayment()` is called, the encrypted amount is used without being decrypted
-
-## Why Amounts Are Private
-
-Traditional smart contracts store all data in plaintext — anyone can read any state variable. Fhenix's CoFHE (Collaborative Fully Homomorphic Encryption) changes this: certain variables are encrypted at the protocol level, making them unreadable even to node operators.
-
-This means:
-- Competitors can't see how much you're paying
-- Recipients can't front-run the payment
-- Network observers learn nothing about value flows
+**Live contract:** [`0x7091056ca13fd6a2e09d0bc4944e87a0b6b909cb`](https://sepolia.etherscan.io/address/0x7091056ca13fd6a2e09d0bc4944e87a0b6b909cb) on Ethereum Sepolia
 
 ---
 
-## Project Structure
+## What it does
+
+- **Encrypted amounts** — Payment values are FHE-encrypted in the browser before any data leaves your device. The on-chain ciphertext reveals nothing to observers.
+- **Time-locked release** — Funds are held in the smart contract and only executable after a configurable unlock time (1 min to 30 days).
+- **ENS support** — Send to any `.eth` name; it resolves to an address automatically.
+- **Private memos** — Attach an optional label to any payment. Stored only on your device, never on-chain.
+- **Payment request links** — Generate a shareable URL that pre-fills the Create form with your address as recipient. Anyone can open it and pay you in one click.
+- **Privacy proof** — The landing page shows side-by-side what Etherscan sees (an opaque ciphertext) vs. what you see in the app (the actual payment details).
+
+---
+
+## How it works
 
 ```
-StealthFlow/
+User enters amount
+       ↓
+FHE encrypt in browser (@cofhe/sdk — Threshold FHE)
+       ↓
+setPayment(ctHash, unlockTime, recipient) + ETH → StealthWallet.sol
+       ↓
+[time passes]
+       ↓
+decryptForTx → Threshold Network returns (decryptedValue, signature)
+       ↓
+publishDecryptResult → CoFHE TaskManager on-chain
+       ↓
+executePayment() → contract reads result via getDecryptResultSafe → transfers ETH
+```
+
+The smart contract never sees a plaintext amount. It operates entirely on the encrypted ciphertext and reads the decryption result only at the moment of execution.
+
+---
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| FHE encryption | `@cofhe/sdk v0.4.0` (Threshold FHE) |
+| Smart contract | Solidity + `FHE.sol` (Fhenix CoFHE) |
+| Network | Ethereum Sepolia (chainId 11155111) |
+| Frontend | React 19 + Vite 7 + TypeScript |
+| Web3 | Ethers.js v6 + `Ethers6Adapter` → viem |
+| ENS resolution | Ethers.js v6 mainnet provider |
+| UI | Tailwind CSS v4 + Lucide React + Framer Motion |
+| Package manager | pnpm (monorepo) |
+
+---
+
+## SDK migration (Wave 2)
+
+The original `cofhejs` library and its oracle-based decryption infrastructure were deprecated by Fhenix during the buildathon. StealthFlow was migrated to `@cofhe/sdk v0.4.0` without redeploying the contract.
+
+| Old (`cofhejs`) | New (`@cofhe/sdk`) |
+|---|---|
+| `cofhejs.initializeWithEthers()` | `createCofheClient()` + `Ethers6Adapter()` |
+| `cofhejs.encrypt([Encryptable.uint64()])` | `client.encryptInputs([...]).execute()` |
+| `requestDecryptAmount()` + 15–30s oracle poll | `client.decryptForTx().withoutPermit().execute()` |
+| Oracle publishes result | Client calls `TaskManager.publishDecryptResult()` |
+
+The contract's `FHE.getDecryptResultSafe()` works identically with both flows — no redeployment needed.
+
+---
+
+## Project structure
+
+```
+artifacts/stealthflow/
 ├── contracts/
-│   └── StealthWallet.sol      # FHE-encrypted smart contract
-├── scripts/
-│   └── deploy.js              # Hardhat deployment script
+│   └── StealthWallet.sol          # Deployed FHE smart contract
 ├── src/
 │   ├── lib/
-│   │   ├── contract.ts        # ABI, address, encryption helpers
-│   │   └── wallet.ts          # MetaMask connection helpers
-│   └── pages/
-│       └── Home.tsx           # Main UI
-├── hardhat.config.js          # Hardhat configuration
-└── .env.example               # Environment variable template
+│   │   ├── contract.ts            # ABI, addresses, formatters
+│   │   ├── wallet.ts              # MetaMask connection
+│   │   ├── ens.ts                 # ENS name resolution (mainnet)
+│   │   ├── labels.ts              # Local payment memos (device-only)
+│   │   ├── txStorage.ts           # Local tx hash persistence
+│   │   ├── historyStorage.ts      # Cached payment history
+│   │   └── paymentStatus.ts       # Payment status derivation
+│   ├── pages/
+│   │   ├── Landing.tsx            # Hero + privacy proof panel
+│   │   ├── Create.tsx             # New payment form (ENS, memo, request link)
+│   │   ├── Dashboard.tsx          # Payment list with live countdowns
+│   │   ├── Execute.tsx            # Threshold decrypt + execute flow
+│   │   └── Receipts.tsx           # Executed payment receipts
+│   └── components/
+│       ├── Navbar.tsx
+│       ├── WalletGate.tsx
+│       └── PrivacyModal.tsx
+└── vite.config.ts
 ```
 
 ---
 
-## Setup & Deployment
-
-### 1. Install dependencies
+## Development
 
 ```bash
-# Root monorepo
+# Install dependencies (from repo root)
 pnpm install
 
-# Contract dependencies (in artifacts/stealthflow)
-npm install --save-dev hardhat @nomicfoundation/hardhat-toolbox dotenv
+# Start dev server
+cd artifacts/stealthflow && pnpm run dev
+# Runs on http://localhost:5000
 ```
 
-### 2. Configure environment
-
-```bash
-cp .env.example .env
-# Edit .env and add your PRIVATE_KEY
-```
-
-### 3. Compile the contract
-
-```bash
-npx hardhat compile
-```
-
-### 4. Get test ETH
-
-- **Fhenix Helium faucet**: https://faucet.helium.fhenix.zone
-- Paste your wallet address and request test tokens
-
-### 5. Deploy to Fhenix Helium Testnet
-
-```bash
-npx hardhat run scripts/deploy.js --network fhenixHelium
-```
-
-### 6. Update contract address
-
-Copy the printed contract address and update:
-
-```typescript
-// src/lib/contract.ts
-export const CONTRACT_ADDRESS = "0xYourDeployedAddress";
-```
-
-### 7. Run the frontend
-
-```bash
-# From the repo root
-pnpm --filter @workspace/stealthflow run dev
-```
+Requires MetaMask connected to **Ethereum Sepolia**. No API keys or environment variables needed.
 
 ---
 
-## Smart Contract Reference
+## Contract addresses (Ethereum Sepolia)
 
-### `StealthWallet.sol`
-
-| Function | Description |
-|----------|-------------|
-| `setPayment(euint64, uint256, address)` | Schedule a payment. Owner only. Amount is FHE-encrypted. |
-| `executePayment()` | Execute payment when `block.timestamp >= unlockTime`. |
-| `canExecute()` | Returns true if payment is ready to execute. |
-| `timeUntilUnlock()` | Seconds remaining until unlock. |
-
-### Events
-
-| Event | When |
-|-------|------|
-| `PaymentScheduled(address, uint256)` | Payment is successfully scheduled |
-| `PaymentExecuted(address)` | Payment is executed |
+| Contract | Address |
+|---|---|
+| StealthWallet | `0x7091056ca13fd6a2e09d0bc4944e87a0b6b909cb` |
+| CoFHE TaskManager | `0xeA30c4B8b44078Bbf8a6ef5b9f1eC1626C7848D9` |
 
 ---
 
-## Networks
+## Roadmap
 
-| Network | Chain ID | RPC |
-|---------|----------|-----|
-| Fhenix Helium (primary) | 8008135 | https://api.helium.fhenix.zone |
-| Base Sepolia (no FHE) | 84532 | https://sepolia.base.org |
-| Hardhat Local | 31337 | http://127.0.0.1:8545 |
+- **FHE-ERC20 architecture** — Replace native ETH with `FHE.add`/`FHE.sub` so amounts stay encrypted even during transfer
+- **ERC-5564 stealth addresses** — One-time recipient addresses so sender-recipient pairs are unlinkable
+- **Paymaster/relayer** — Remove the need for senders to hold ETH; privacy from day one
+- **Signed payment requests** — Upgrade the URL-based request link to a verifiable signed standard
 
 ---
-
-## Security
-
-- The `encryptedAmount` state variable is declared `private` — Solidity prevents direct reads
-- The `onlyOwner` modifier restricts `setPayment()` to the contract owner
-- Checks-effects-interactions pattern is used in `executePayment()` to prevent reentrancy
-- Amounts are never decrypted inside the contract
 
 ## License
 
