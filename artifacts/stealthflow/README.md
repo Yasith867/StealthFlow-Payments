@@ -4,7 +4,7 @@ Privacy-first confidential payment infrastructure on Ethereum Sepolia, powered b
 
 Schedule time-locked payments where the amount stays fully encrypted on-chain — from creation through execution. Nobody except the sender and recipient can see what was transferred.
 
-**Live contract:** [`0x7091056ca13fd6a2e09d0bc4944e87a0b6b909cb`](https://sepolia.etherscan.io/address/0x7091056ca13fd6a2e09d0bc4944e87a0b6b909cb) on Ethereum Sepolia
+(https://sepolia.etherscan.io/address/0x7091056ca13fd6a2e09d0bc4944e87a0b6b909cb) on Ethereum Sepolia
 
 ---
 
