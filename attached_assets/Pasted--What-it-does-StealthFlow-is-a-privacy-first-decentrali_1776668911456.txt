@@ -1,0 +1,125 @@
+🚀 What it does
+StealthFlow is a privacy-first decentralized application designed for scheduling conditional payments on the blockchain.
+
+🔐 It leverages Fully Homomorphic Encryption (FHE) to ensure that transaction financial volumes remain completely hidden on the public ledger throughout their entire lifecycle.
+
+✨ Key Capabilities:
+⏳ Schedule payments to any Ethereum wallet
+🔒 Funds unlock only after a specified time
+🧠 Payment amounts remain fully encrypted at all times
+👀 No visibility for:
+Blockchain observers
+RPC providers
+Unauthorized third parties
+🧩 The problem it solves
+Traditional Ethereum escrow contracts are fully transparent.
+
+⚠️ Issues:
+💸 msg.value is publicly visible
+📊 Internal contract state is exposed in plaintext
+🕵️ Leads to:
+Financial surveillance
+Metadata leaks
+Privacy violations
+🔍 Real-world risks:
+Salary exposure
+Vendor deal visibility
+Wallet balance tracking
+🛡️ StealthFlow Solution
+StealthFlow introduces true on-chain privacy:
+
+🔐 Client-side encryption of transaction amounts
+⚙️ Homomorphic processing of logic directly on-chain
+🧠 Enables programmable finance without revealing sensitive data
+⚔️ Challenges I ran into
+⏱️ Asynchronous Decryption Complexity
+The biggest hurdle was handling Fhenix CoFHE asynchronous decryption.
+
+❌ Initial Problem:
+Triggered execution immediately after decryption request
+Failed because:
+Oracle response takes 15–30 seconds on Sepolia
+Cannot complete in a single EVM block
+✅ Solution:
+Built an intelligent staticCall polling loop
+UI now:
+📨 Sends decryption request
+⏳ Waits for oracle callback
+🔓 Detects ciphertext unsealing
+💸 Triggers final MetaMask execution
+⛓️ Time-lock Constraints
+Ethereum Sepolia block time: ~12–15 seconds
+❗ Caused transaction reversions for short locks
+✅ Fix:
+Enforced minimum 60-second time-locks in UI
+🧰 Technologies I used
+🔐 Encryption
+Fhenix Protocol (@fhenixprotocol/cofhejs, FHE.sol)
+⛓️ Blockchain
+Ethereum Sepolia (Chain ID: 11155111)
+📜 Smart Contracts
+Solidity
+Hardhat / Foundry
+💻 Frontend
+React
+TypeScript
+Vite
+🔗 Web3 Integration
+Ethers.js v6
+🎨 UI/UX
+Tailwind CSS
+Radix UI
+Lucide React
+🚀 Deployment
+Vercel
+🏗️ How we built it
+We structured StealthFlow into two core layers:
+
+⛓️ 1. FHE Smart Contract — StealthWallet.sol
+Uses Fhenix FHE.sol utilities
+Stores deposits as encrypted euint64 values
+🔐 Enforces access control via FHE.allow()
+💻 2. Client-Side Encrypted UI
+High-performance React SPA
+🧠 Uses fhenixjs for in-browser encryption
+Flow:
+User inputs payment amount
+🔒 Encrypted into InEuint64 in browser memory
+📡 Sent to blockchain (never exposed in plaintext)
+📚 What we learned
+Building encrypted blockchain systems requires a new UX paradigm.
+
+⚠️ Key Insights:
+FHE operations are computationally heavy
+WASM encryption
+Co-processor decryption
+Requires:
+⏳ Clear loading states
+📢 Transparent user feedback
+✅ Our UX Solution:
+“Waiting for Oracle” polling notifications
+Real-time feedback loop
+Prevents user confusion and drop-off
+🔮 What's next for StealthFlow
+🧠 Current Limitation:
+Uses native ETH
+Requires temporary decryption during execution
+🚀 V2 Roadmap
+🔐 1. True Zero-Knowledge Execution
+Replace ETH with FHE-ERC20 token architecture
+Use:
+➕ FHE.add
+➖ FHE.sub
+✅ Result:
+
+Amounts remain encrypted even during execution
+🕵️ 2. Identity Obfuscation
+Integrate Ethereum Stealth Address Standard (ERC-5564)
+✅ Benefits:
+
+🔀 Dynamically generated receiver addresses
+❌ No sender-recipient linkability
+🔐 Combined with FHE → full privacy:
+Identity + Amount
+🔥 StealthFlow is pushing Web3 toward truly private, programmable finance.
+
