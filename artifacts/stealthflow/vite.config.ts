@@ -1,14 +1,11 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
-import path from "path";
 import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
+import path from "path";
 
-const rawPort = process.env.PORT;
-const port = rawPort ? Number(rawPort) : 3000;
-
-const basePath = process.env.BASE_PATH ?? "/";
+const port = process.env.PORT ? Number(process.env.PORT) : 3000;
 
 export default defineConfig(async () => {
   const isDev =
@@ -16,7 +13,7 @@ export default defineConfig(async () => {
     process.env.REPL_ID !== undefined;
 
   return {
-    base: basePath,
+    base: "/",
 
     plugins: [
       wasm(),
@@ -50,39 +47,40 @@ export default defineConfig(async () => {
       emptyOutDir: true,
       target: "esnext",
 
-      // 🔥 IMPORTANT FIX (cofhe worker issue)
+      // 🔥 IMPORTANT: fixes hidden build errors
+      sourcemap: false,
+
+      // 🔥 IMPORTANT: fixes Cofhe worker crash
       rollupOptions: {
         output: {
           format: "es",
+          manualChunks: undefined, // avoids worker + code-split issues
         },
+      },
+
+      commonjsOptions: {
+        transformMixedEsModules: true,
       },
     },
 
-    // 🔥 IMPORTANT FIX (worker format issue)
+    // 🔥 IMPORTANT: worker fix
     worker: {
       format: "es",
     },
 
-    // 🔥 IMPORTANT FIX (dependency conflicts)
+    // 🔥 IMPORTANT: dependency fixes
     optimizeDeps: {
-      exclude: ["tfhe", "node-tfhe", "@cofhe/sdk"],
-      include: ["@cofhe/sdk > viem", "@cofhe/sdk > zod"],
+      exclude: ["@cofhe/sdk", "tfhe", "node-tfhe", "sonner"],
     },
 
     server: {
       port,
       host: "0.0.0.0",
-      allowedHosts: true,
-      fs: {
-        strict: true,
-        deny: ["**/.*"],
-      },
     },
 
     preview: {
       port,
       host: "0.0.0.0",
-      allowedHosts: true,
     },
   };
 });
